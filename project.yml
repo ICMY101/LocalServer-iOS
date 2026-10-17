@@ -24,7 +24,7 @@ targets:
         PRODUCT_NAME: LocalServer
         PRODUCT_BUNDLE_IDENTIFIER: com.localserver.app
         # 发布版本号；构建号（CURRENT_PROJECT_VERSION）由 CI 自动设置为运行次数
-        MARKETING_VERSION: "1.1"
+        MARKETING_VERSION: "2.0"
         CURRENT_PROJECT_VERSION: "1"
         INFOPLIST_FILE: Info.plist
         GENERATE_INFOPLIST_FILE: NO

@@ -115,11 +115,5 @@
 		<string>audio</string>
 	</array>
 
-	<!-- 允许内置浏览器以 http 访问本机和局域网地址 -->
-	<key>NSAppTransportSecurity</key>
-	<dict>
-		<key>NSAllowsLocalNetworking</key>
-		<true/>
-	</dict>
 </dict>
 </plist>

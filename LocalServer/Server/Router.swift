@@ -8,29 +8,53 @@ final class Router {
         var webAdmin = true
         var cors = false
         var liveReload = true
-        var adminPassword = ""
+        /// 电脑端管理页是否需要先用配对码配对
+        var requirePairing = true
         /// 当前网站相对存储根目录的路径，空字符串表示存储根目录本身
         var siteRoot = ""
     }
 
-    var config: Config
+    /// 请求在并发队列上处理，配置可能同时被界面修改，所以读写都加锁
+    var config: Config {
+        get { lock.lock(); defer { lock.unlock() }; return storedConfig }
+        set { lock.lock(); storedConfig = newValue; lock.unlock() }
+    }
+
+    /// 文件被网页管理修改后回调
     var onFilesChanged: (() -> Void)?
 
     /// 存储根目录（www），网页管理在这里操作
     let storageRoot: URL
+    let liveReload = LiveReload()
+    private let admin: AdminAPI
     private let fileManager = FileManager.default
-    private let liveReload = LiveReload()
-    private lazy var admin = AdminAPI(root: storageRoot) { [weak self] in
-        self?.onFilesChanged?()
-    }
+    private let lock = NSLock()
+    private var storedConfig: Config
 
-    init(rootURL: URL, config: Config) {
+    private static let listingDateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd HH:mm"
+        return formatter
+    }()
+
+    private static let sizeFormatter: ByteCountFormatter = {
+        let formatter = ByteCountFormatter()
+        formatter.countStyle = .file
+        return formatter
+    }()
+
+    init(rootURL: URL, config: Config, pairing: PairingStore) {
         self.storageRoot = rootURL
-        self.config = config
+        self.storedConfig = config
+        self.admin = AdminAPI(root: rootURL, pairing: pairing)
+        admin.onChange = { [weak self] in
+            self?.liveReload.notifyChanged()
+            self?.onFilesChanged?()
+        }
     }
 
     /// 对外提供服务的网站根目录；设置的文件夹不存在时回退到存储根目录
-    var siteRootURL: URL {
+    func siteRootURL(for config: Config) -> URL {
         guard !config.siteRoot.isEmpty,
               let url = PathResolver.resolve(config.siteRoot, in: storageRoot) else {
             return storageRoot
@@ -42,37 +66,45 @@ final class Router {
         return url
     }
 
-    func handle(_ request: HTTPRequest) -> HTTPResponse {
+    /// 处理请求。大多数请求同步完成；Live Reload 的长轮询会稍后才调用 completion。
+    /// 可在任意线程调用，completion 也可能在任意线程被调用。
+    func handle(_ request: HTTPRequest, completion: @escaping (HTTPResponse) -> Void) {
+        let config = self.config
         let isAdmin = request.path == AdminAPI.prefix || request.path.hasPrefix(AdminAPI.prefix + "/")
-        var response: HTTPResponse
+        let finish: (HTTPResponse) -> Void = { response in
+            var response = response
+            response.setHeader("Server", "LocalServer-iOS")
+            // 管理接口不开放跨域，防止其它网站借用户的浏览器修改文件
+            if config.cors && !isAdmin {
+                response.setHeader("Access-Control-Allow-Origin", "*")
+            }
+            completion(response)
+        }
 
         if isAdmin {
-            response = config.webAdmin
-                ? admin.handle(request, password: config.adminPassword, siteRoot: config.siteRoot)
-                : .error(404)
+            finish(config.webAdmin
+                ? admin.handle(request, requirePairing: config.requirePairing, siteRoot: config.siteRoot)
+                : .error(404))
         } else if LiveReload.handles(request.path) {
-            response = config.liveReload ? liveReload.handle(request, root: siteRootURL) : .error(404)
+            if config.liveReload {
+                liveReload.handle(request, root: siteRootURL(for: config), completion: finish)
+            } else {
+                finish(.error(404))
+            }
         } else if request.method == "OPTIONS" && config.cors {
-            response = HTTPResponse(status: 204, headers: [
+            finish(HTTPResponse(status: 204, headers: [
                 ("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS"),
                 ("Access-Control-Allow-Headers", request.header("access-control-request-headers") ?? "*"),
                 ("Access-Control-Max-Age", "86400"),
-            ])
+            ]))
         } else {
-            response = serveStatic(request, root: siteRootURL)
+            finish(serveStatic(request, root: siteRootURL(for: config), config: config))
         }
-
-        response.setHeader("Server", "LocalServer-iOS")
-        // 管理接口不开放跨域，防止其它网站借用户的浏览器修改文件
-        if config.cors && !isAdmin {
-            response.setHeader("Access-Control-Allow-Origin", "*")
-        }
-        return response
     }
 
     // MARK: - 静态文件
 
-    private func serveStatic(_ request: HTTPRequest, root: URL) -> HTTPResponse {
+    private func serveStatic(_ request: HTTPRequest, root: URL, config: Config) -> HTTPResponse {
         guard request.method == "GET" || request.method == "HEAD" else {
             return .error(405, headers: [("Allow", "GET, HEAD")])
         }
@@ -83,7 +115,7 @@ final class Router {
         var isDirectory: ObjCBool = false
         if fileManager.fileExists(atPath: url.path, isDirectory: &isDirectory) {
             guard isDirectory.boolValue else {
-                return serveFile(url, for: request)
+                return serveFile(url, for: request, injectLiveReload: config.liveReload)
             }
             if !request.rawPath.hasSuffix("/") {
                 let query = request.rawQuery.isEmpty ? "" : "?" + request.rawQuery
@@ -92,7 +124,7 @@ final class Router {
             for name in ["index.html", "index.htm"] {
                 let index = url.appendingPathComponent(name)
                 if isRegularFile(index) {
-                    return serveFile(index, for: request)
+                    return serveFile(index, for: request, injectLiveReload: config.liveReload)
                 }
             }
             if config.directoryListing {
@@ -104,12 +136,12 @@ final class Router {
         if config.spaFallback, request.header("accept")?.contains("text/html") == true {
             let index = root.appendingPathComponent("index.html")
             if isRegularFile(index) {
-                return serveFile(index, for: request)
+                return serveFile(index, for: request, injectLiveReload: config.liveReload)
             }
         }
         let notFoundPage = root.appendingPathComponent("404.html")
         if isRegularFile(notFoundPage) {
-            return serveFile(notFoundPage, for: request, status: 404)
+            return serveFile(notFoundPage, for: request, status: 404, injectLiveReload: config.liveReload)
         }
         return .error(404, request.path)
     }
@@ -119,7 +151,7 @@ final class Router {
         return fileManager.fileExists(atPath: url.path, isDirectory: &isDirectory) && !isDirectory.boolValue
     }
 
-    private func serveFile(_ url: URL, for request: HTTPRequest, status: Int = 200) -> HTTPResponse {
+    private func serveFile(_ url: URL, for request: HTTPRequest, status: Int = 200, injectLiveReload: Bool) -> HTTPResponse {
         guard let attributes = try? fileManager.attributesOfItem(atPath: url.path) else {
             return .error(404)
         }
@@ -127,7 +159,7 @@ final class Router {
         let modified = (attributes[.modificationDate] as? Date) ?? Date()
         let contentType = MIMEType.forExtension(url.pathExtension)
         // 开启 Live Reload 时，在 HTML 中插入自动刷新脚本
-        let inject = config.liveReload && contentType.hasPrefix("text/html") && size <= LiveReload.maxInjectSize
+        let inject = injectLiveReload && contentType.hasPrefix("text/html") && size <= LiveReload.maxInjectSize
 
         let etagCore = "\(String(size, radix: 16))-\(String(Int64(modified.timeIntervalSince1970 * 1000), radix: 16))"
         let etag = "\"\(etagCore)\(inject ? "-lr" : "")\""
@@ -191,11 +223,6 @@ final class Router {
             return $0.name.localizedStandardCompare($1.name) == .orderedAscending
         }
 
-        let dateFormatter = DateFormatter()
-        dateFormatter.dateFormat = "yyyy-MM-dd HH:mm"
-        let sizeFormatter = ByteCountFormatter()
-        sizeFormatter.countStyle = .file
-
         var rows = ""
         if request.path != "/" {
             rows += "<tr><td><a href=\"../\">📁 ../</a></td><td></td><td></td></tr>"
@@ -205,8 +232,8 @@ final class Router {
                 + (entry.isDirectory ? "/" : "")
             let icon = entry.isDirectory ? "📁" : "📄"
             let display = entry.name + (entry.isDirectory ? "/" : "")
-            let size = entry.isDirectory ? "—" : sizeFormatter.string(fromByteCount: Int64(entry.size))
-            let date = entry.modified.map(dateFormatter.string(from:)) ?? ""
+            let size = entry.isDirectory ? "—" : Self.sizeFormatter.string(fromByteCount: Int64(entry.size))
+            let date = entry.modified.map(Self.listingDateFormatter.string(from:)) ?? ""
             rows += "<tr><td><a href=\"\(encoded.htmlEscaped)\">\(icon) \(display.htmlEscaped)</a></td>"
                 + "<td class=\"r\">\(size)</td><td class=\"r\">\(date)</td></tr>"
         }

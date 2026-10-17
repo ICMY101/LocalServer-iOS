@@ -7,6 +7,8 @@ struct RequestLog: Identifiable {
     let method: String
     let path: String
     let status: Int
+    /// 响应体大小
+    var bytes: UInt64 = 0
     let client: String
 }
 
@@ -26,22 +28,48 @@ final class HTTPServer {
     /// Bonjour 服务注册成功时回调实际使用的服务名（重名时系统会自动改名），取消注册时为 nil
     var onServiceRegistered: (@Sendable (String?) -> Void)?
 
-    private let queue = DispatchQueue(label: "LocalServer.http")
+    /// 网络收发都在这个串行队列上进行
+    private let queue = DispatchQueue(label: "LocalServer.http", qos: .userInitiated)
+    /// 请求处理（读文件、解压、目录列表）放在并发队列，不会阻塞其他连接的收发
+    private let workQueue = DispatchQueue(label: "LocalServer.work", qos: .userInitiated, attributes: .concurrent)
     private let router: Router
+    private let activityLock = NSLock()
+    private var lastActivityDate = Date()
     private var listener: NWListener?
     private var connections: [ObjectIdentifier: HTTPConnection] = [:]
 
-    init(rootURL: URL, config: Router.Config) {
-        router = Router(rootURL: rootURL, config: config)
+    /// 电脑端管理页的配对状态
+    let pairing: PairingStore
+
+    init(rootURL: URL, config: Router.Config, pairing: PairingStore = PairingStore(fileURL: nil)) {
+        self.pairing = pairing
+        router = Router(rootURL: rootURL, config: config, pairing: pairing)
         router.onFilesChanged = { [weak self] in
             self?.onFilesChanged?()
         }
     }
 
     func updateConfig(_ config: Router.Config) {
-        queue.async {
-            self.router.config = config
-        }
+        router.config = config
+    }
+
+    /// App 内修改了文件时调用，让正在等待的 Live Reload 页面立即刷新
+    func notifyFilesChanged() {
+        router.liveReload.notifyChanged()
+    }
+
+    /// 最近一次收到请求的时间（不含 Live Reload 轮询），用于判断后台是否空闲
+    var lastActivity: Date {
+        activityLock.lock()
+        defer { activityLock.unlock() }
+        return lastActivityDate
+    }
+
+    /// 把“最近活动时间”设为现在，例如 App 刚进入后台时从零开始计算空闲时长
+    func markActivity() {
+        activityLock.lock()
+        lastActivityDate = Date()
+        activityLock.unlock()
     }
 
     func start(port: UInt16, localOnly: Bool, bonjourName: String? = nil) {
@@ -138,18 +166,27 @@ final class HTTPServer {
 
     private func accept(_ nwConnection: NWConnection) {
         let router = self.router
+        let workQueue = self.workQueue
         let connection = HTTPConnection(
             connection: nwConnection,
             queue: queue,
-            handler: { request in router.handle(request) },
+            handler: { request, completion in
+                workQueue.async {
+                    router.handle(request, completion: completion)
+                }
+            },
             onResponse: { [weak self] request, response in
-                // Live Reload 每秒轮询一次，不记录到日志里
-                guard !LiveReload.handles(request.path) else { return }
-                self?.onRequest?(RequestLog(
+                // Live Reload 的长轮询不记录到日志，也不算作活动
+                guard let self, !LiveReload.handles(request.path) else { return }
+                self.activityLock.lock()
+                self.lastActivityDate = Date()
+                self.activityLock.unlock()
+                self.onRequest?(RequestLog(
                     date: Date(),
                     method: request.method,
                     path: request.path + (request.rawQuery.isEmpty ? "" : "?" + request.rawQuery),
                     status: response.status,
+                    bytes: request.method == "HEAD" ? 0 : response.contentLength,
                     client: request.remoteAddress
                 ))
             },

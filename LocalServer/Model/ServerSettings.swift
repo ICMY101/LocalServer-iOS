@@ -10,11 +10,14 @@ struct ServerSettings: Codable, Equatable {
     var cors = false
     var liveReload = true
     var webAdmin = true
-    /// 为空表示上传页面无需密码
-    var adminPassword = ""
+    /// 电脑端管理页需要先用手机上的配对码配对
+    var requirePairing = true
     var autoExtractZip = true
     var keepScreenOn = false
-    var backgroundAudio = false
+    /// 网页在系统浏览器中打开，App 会进入后台，所以默认开启后台保活
+    var backgroundAudio = true
+    /// 后台保活时，连续多少分钟没有请求就停止保活让系统挂起 App；0 表示一直保活
+    var keepAliveIdleMinutes = 15
     /// 当前网站相对 www 的路径，空字符串表示 www 本身
     var siteRoot = ""
 
@@ -27,7 +30,7 @@ struct ServerSettings: Codable, Equatable {
             webAdmin: webAdmin,
             cors: cors,
             liveReload: liveReload,
-            adminPassword: adminPassword,
+            requirePairing: requirePairing,
             siteRoot: siteRoot
         )
     }
@@ -36,7 +39,7 @@ struct ServerSettings: Codable, Equatable {
 
     private enum CodingKeys: String, CodingKey {
         case port, allowLAN, autoStart, bonjour, directoryListing, spaFallback, cors, liveReload
-        case webAdmin, adminPassword, autoExtractZip, keepScreenOn, backgroundAudio, siteRoot
+        case webAdmin, requirePairing, autoExtractZip, keepScreenOn, backgroundAudio, keepAliveIdleMinutes, siteRoot
     }
 
     /// 逐个字段解码，缺失的字段使用默认值，这样新版本新增设置项时不会丢掉用户原有的设置
@@ -52,10 +55,11 @@ struct ServerSettings: Codable, Equatable {
         cors = (try? container.decodeIfPresent(Bool.self, forKey: .cors)) ?? defaults.cors
         liveReload = (try? container.decodeIfPresent(Bool.self, forKey: .liveReload)) ?? defaults.liveReload
         webAdmin = (try? container.decodeIfPresent(Bool.self, forKey: .webAdmin)) ?? defaults.webAdmin
-        adminPassword = (try? container.decodeIfPresent(String.self, forKey: .adminPassword)) ?? defaults.adminPassword
+        requirePairing = (try? container.decodeIfPresent(Bool.self, forKey: .requirePairing)) ?? defaults.requirePairing
         autoExtractZip = (try? container.decodeIfPresent(Bool.self, forKey: .autoExtractZip)) ?? defaults.autoExtractZip
         keepScreenOn = (try? container.decodeIfPresent(Bool.self, forKey: .keepScreenOn)) ?? defaults.keepScreenOn
         backgroundAudio = (try? container.decodeIfPresent(Bool.self, forKey: .backgroundAudio)) ?? defaults.backgroundAudio
+        keepAliveIdleMinutes = (try? container.decodeIfPresent(Int.self, forKey: .keepAliveIdleMinutes)) ?? defaults.keepAliveIdleMinutes
         siteRoot = (try? container.decodeIfPresent(String.self, forKey: .siteRoot)) ?? defaults.siteRoot
     }
 
@@ -73,10 +77,5 @@ struct ServerSettings: Codable, Equatable {
         if let data = try? JSONEncoder().encode(self) {
             UserDefaults.standard.set(data, forKey: Self.storageKey)
         }
-    }
-
-    /// 生成 6 位数字访问码
-    static func randomPassword() -> String {
-        String((0..<6).map { _ in "0123456789".randomElement()! })
     }
 }

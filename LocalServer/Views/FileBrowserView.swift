@@ -1,22 +1,45 @@
 import SwiftUI
 import UniformTypeIdentifiers
 
+/// “文件”页：浏览、搜索、排序网站文件，支持列表和网格两种视图
 struct FileBrowserView: View {
     let directory: URL
 
     @EnvironmentObject private var server: ServerManager
     @Environment(\.scenePhase) private var scenePhase
 
+    @AppStorage("FileSortOrder") private var sortOrder = SortOrder.name
+    @AppStorage("FileGridMode") private var gridMode = false
+
     @State private var items: [FileItem] = []
+    @State private var query = ""
     @State private var showImporter = false
     @State private var importTypes: [UTType] = [.item]
     @State private var nameAction: NameAction?
     @State private var nameText = ""
     @State private var deleteTarget: FileItem?
-    @State private var browserTarget: BrowserTarget?
     @State private var editingItem: FileItem?
     @State private var message: String?
     @State private var isWorking = false
+    /// 一次选中多个文件时，等待用户决定是否放进新文件夹
+    @State private var pendingImport: [URL]?
+    @State private var folderNameText = ""
+
+    enum SortOrder: String, CaseIterable, Identifiable {
+        case name
+        case date
+        case size
+
+        var id: String { rawValue }
+
+        var title: String {
+            switch self {
+            case .name: return "名称"
+            case .date: return "修改时间"
+            case .size: return "大小"
+            }
+        }
+    }
 
     private enum NameAction {
         case newFolder
@@ -36,118 +59,164 @@ struct FileBrowserView: View {
         directory.standardizedFileURL.path == FileStore.rootURL.standardizedFileURL.path
     }
 
-    var body: some View {
-        List {
-            ForEach(items) { item in
-                row(for: item)
+    /// 搜索、排序后的列表；文件夹始终排在前面
+    private var displayed: [FileItem] {
+        let matched = query.isEmpty ? items : items.filter { $0.name.localizedCaseInsensitiveContains(query) }
+        return matched.sorted { a, b in
+            if a.isDirectory != b.isDirectory { return a.isDirectory }
+            switch sortOrder {
+            case .name:
+                return a.name.localizedStandardCompare(b.name) == .orderedAscending
+            case .date:
+                return (a.modified ?? .distantPast) > (b.modified ?? .distantPast)
+            case .size:
+                return a.size > b.size
             }
-        }
-        .overlay {
-            if items.isEmpty {
-                VStack(spacing: 10) {
-                    Image(systemName: "folder")
-                        .font(.system(size: 44))
-                        .foregroundColor(.secondary)
-                    Text("空文件夹")
-                        .font(.headline)
-                    Text("点击右上角 + 导入 HTML、CSS、JS、图片等文件")
-                        .font(.subheadline)
-                        .foregroundColor(.secondary)
-                        .multilineTextAlignment(.center)
-                }
-                .padding()
-            }
-        }
-        .overlay {
-            if isWorking {
-                ProgressView("正在处理…")
-                    .padding(20)
-                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14))
-            }
-        }
-        .disabled(isWorking)
-        .navigationTitle(isRoot ? "网站文件" : directory.lastPathComponent)
-        .toolbar {
-            ToolbarItem(placement: .primaryAction) {
-                addMenu
-            }
-            if isRoot {
-                ToolbarItem(placement: .navigationBarLeading) {
-                    Button {
-                        preview(url: server.siteRootURL, isDirectory: true)
-                    } label: {
-                        Label("预览网站", systemImage: "play.circle")
-                    }
-                }
-            }
-        }
-        .refreshable { await reload() }
-        .onAppear { reload() }
-        .onChange(of: server.filesVersion) { _ in reload() }
-        .onChange(of: scenePhase) { phase in
-            if phase == .active { reload() }
-        }
-        .fileImporter(isPresented: $showImporter, allowedContentTypes: importTypes, allowsMultipleSelection: true) { result in
-            handleImport(result)
-        }
-        .alert(nameAction?.title ?? "", isPresented: Binding(
-            get: { nameAction != nil },
-            set: { if !$0 { nameAction = nil } }
-        )) {
-            TextField("名称", text: $nameText)
-                .textInputAutocapitalization(.never)
-                .autocorrectionDisabled()
-            Button("取消", role: .cancel) {}
-            Button("确定") { commitName() }
-        } message: {
-            if case .newFile? = nameAction {
-                Text("未写扩展名时默认为 .html")
-            }
-        }
-        .confirmationDialog(
-            "删除「\(deleteTarget?.name ?? "")」？",
-            isPresented: Binding(get: { deleteTarget != nil }, set: { if !$0 { deleteTarget = nil } }),
-            titleVisibility: .visible
-        ) {
-            Button("删除", role: .destructive) {
-                if let item = deleteTarget { perform { try FileStore.delete(item) } }
-            }
-        } message: {
-            if deleteTarget?.isDirectory == true {
-                Text("文件夹中的所有内容都会被删除，且无法恢复。")
-            } else {
-                Text("此操作无法撤销。")
-            }
-        }
-        .alert("提示", isPresented: Binding(get: { message != nil }, set: { if !$0 { message = nil } })) {
-            Button("好", role: .cancel) {}
-        } message: {
-            Text(message ?? "")
-        }
-        .fullScreenCover(item: $browserTarget) { target in
-            BrowserView(target: target)
-        }
-        .sheet(item: $editingItem, onDismiss: reload) { item in
-            TextFileEditor(url: item.url)
         }
     }
 
-    // MARK: - 视图
+    var body: some View {
+        content
+            .overlay {
+                if displayed.isEmpty {
+                    emptyState
+                }
+            }
+            .overlay {
+                if isWorking {
+                    ProgressView("正在处理…")
+                        .padding(22)
+                        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                }
+            }
+            .disabled(isWorking)
+            .searchable(text: $query, prompt: "搜索当前文件夹")
+            .navigationTitle(isRoot ? "网站文件" : directory.lastPathComponent)
+            .toolbar {
+                ToolbarItemGroup(placement: .primaryAction) {
+                    optionsMenu
+                    addMenu
+                }
+            }
+            .onAppear { reload() }
+            .onChange(of: server.filesVersion) { _ in reload() }
+            .onChange(of: scenePhase) { phase in
+                if phase == .active { reload() }
+            }
+            .fileImporter(isPresented: $showImporter, allowedContentTypes: importTypes, allowsMultipleSelection: true) { result in
+                handleImport(result)
+            }
+            .alert(nameAction?.title ?? "", isPresented: Binding(
+                get: { nameAction != nil },
+                set: { if !$0 { nameAction = nil } }
+            )) {
+                TextField("名称", text: $nameText)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                Button("取消", role: .cancel) {}
+                Button("确定") { commitName() }
+            } message: {
+                if case .newFile? = nameAction {
+                    Text("未写扩展名时默认为 .html")
+                }
+            }
+            .confirmationDialog(
+                "删除「\(deleteTarget?.name ?? "")」？",
+                isPresented: Binding(get: { deleteTarget != nil }, set: { if !$0 { deleteTarget = nil } }),
+                titleVisibility: .visible
+            ) {
+                Button("删除", role: .destructive) {
+                    if let item = deleteTarget { perform { try FileStore.delete(item) } }
+                }
+            } message: {
+                if deleteTarget?.isDirectory == true {
+                    Text("文件夹中的所有内容都会被删除，且无法恢复。")
+                } else {
+                    Text("此操作无法撤销。")
+                }
+            }
+            .alert("放进新文件夹？", isPresented: Binding(
+                get: { pendingImport != nil },
+                set: { if !$0 { pendingImport = nil } }
+            )) {
+                TextField("文件夹名称", text: $folderNameText)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                Button("放进新文件夹") {
+                    let name = folderNameText.trimmingCharacters(in: .whitespacesAndNewlines)
+                    startImport(pendingImport ?? [], newFolderName: name.isEmpty ? nil : name)
+                }
+                Button("直接放在这里") {
+                    startImport(pendingImport ?? [], newFolderName: nil)
+                }
+                Button("取消", role: .cancel) {}
+            } message: {
+                Text("选中了 \(pendingImport?.count ?? 0) 个文件，放进同一个文件夹可以避免散落在当前目录。")
+            }
+            .alert("提示", isPresented: Binding(get: { message != nil }, set: { if !$0 { message = nil } })) {
+                Button("好", role: .cancel) {}
+            } message: {
+                Text(message ?? "")
+            }
+            .sheet(item: $editingItem, onDismiss: reload) { item in
+                TextFileEditor(url: item.url)
+            }
+    }
+
+    // MARK: - 列表与网格
 
     @ViewBuilder
+    private var content: some View {
+        if gridMode {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 14) {
+                    if isRoot && query.isEmpty {
+                        SiteBanner()
+                    }
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 100), spacing: 12)], spacing: 12) {
+                        ForEach(displayed) { item in
+                            tile(for: item)
+                        }
+                    }
+                    summary
+                        .frame(maxWidth: .infinity)
+                }
+                .padding(16)
+            }
+            .background(Color(.systemGroupedBackground))
+            .refreshable { await reload() }
+        } else {
+            List {
+                if isRoot && query.isEmpty {
+                    Section {
+                        SiteBanner()
+                            .listRowInsets(EdgeInsets())
+                            .listRowBackground(Color.clear)
+                    }
+                }
+                Section {
+                    ForEach(displayed) { item in
+                        row(for: item)
+                    }
+                } footer: {
+                    if !displayed.isEmpty {
+                        summary
+                    }
+                }
+            }
+            .listStyle(.insetGrouped)
+            .refreshable { await reload() }
+        }
+    }
+
     private func row(for item: FileItem) -> some View {
-        Group {
+        let label = FileRowLabel(item: item, isSiteRoot: item.isDirectory && server.isSiteRoot(item.url))
+        return Group {
             if item.isDirectory {
-                NavigationLink(value: item.url) {
-                    FileRow(item: item, isSiteRoot: server.isSiteRoot(item.url))
-                }
+                NavigationLink(value: item.url) { label }
             } else {
-                Button {
-                    open(item)
-                } label: {
-                    FileRow(item: item, isSiteRoot: false)
-                }
-                .foregroundColor(.primary)
+                Button { activate(item) } label: { label }
+                    .foregroundColor(.primary)
             }
         }
         .swipeActions(edge: .trailing) {
@@ -164,65 +233,144 @@ struct FileBrowserView: View {
             }
             .tint(.orange)
         }
-        .contextMenu {
-            Button {
-                preview(url: item.url, isDirectory: item.isDirectory)
-            } label: {
-                Label("在浏览器中预览", systemImage: "safari")
-            }
-            if item.isTextFile {
-                Button {
-                    editingItem = item
-                } label: {
-                    Label("编辑", systemImage: "square.and.pencil")
-                }
-            }
-            if item.isZip {
-                Button {
-                    extract(item)
-                } label: {
-                    Label("解压到此处", systemImage: "archivebox")
-                }
-            }
+        .contextMenu { menu(for: item) }
+    }
+
+    private func tile(for item: FileItem) -> some View {
+        let label = FileTile(item: item, isSiteRoot: item.isDirectory && server.isSiteRoot(item.url))
+        return Group {
             if item.isDirectory {
-                if server.isSiteRoot(item.url) {
-                    Button {
-                        server.setSiteRoot(nil)
-                    } label: {
-                        Label("恢复以 www 为网站根目录", systemImage: "arrow.uturn.backward")
-                    }
-                } else {
-                    Button {
-                        server.setSiteRoot(item.url)
-                    } label: {
-                        Label("设为网站根目录", systemImage: "globe")
-                    }
-                }
-            }
-            if let link = server.previewURL(for: item.url) {
-                Button {
-                    UIPasteboard.general.string = link.absoluteString
-                } label: {
-                    Label("复制链接", systemImage: "link")
-                }
-            }
-            if !item.isDirectory {
-                ShareLink(item: item.url) {
-                    Label("分享", systemImage: "square.and.arrow.up")
-                }
-            }
-            Button {
-                nameText = item.name
-                nameAction = .rename(item)
-            } label: {
-                Label("重命名", systemImage: "pencil")
-            }
-            Button(role: .destructive) {
-                deleteTarget = item
-            } label: {
-                Label("删除", systemImage: "trash")
+                NavigationLink(value: item.url) { label }
+            } else {
+                Button { activate(item) } label: { label }
             }
         }
+        .buttonStyle(.plain)
+        .contextMenu { menu(for: item) }
+    }
+
+    @ViewBuilder
+    private func menu(for item: FileItem) -> some View {
+        Button {
+            openInBrowser(item)
+        } label: {
+            Label("在浏览器中打开", systemImage: "safari")
+        }
+        if item.isTextFile {
+            Button {
+                editingItem = item
+            } label: {
+                Label("编辑", systemImage: "square.and.pencil")
+            }
+        }
+        if item.isZip {
+            Button {
+                extract(item)
+            } label: {
+                Label("解压到同名文件夹", systemImage: "archivebox")
+            }
+        }
+        if item.isDirectory {
+            if server.isSiteRoot(item.url) {
+                Button {
+                    server.setSiteRoot(nil)
+                } label: {
+                    Label("恢复以 www 为网站根目录", systemImage: "arrow.uturn.backward")
+                }
+            } else {
+                Button {
+                    Haptics.tap()
+                    server.setSiteRoot(item.url)
+                } label: {
+                    Label("设为网站根目录", systemImage: "globe")
+                }
+            }
+        }
+        if let link = server.webURL(for: item.url) {
+            Button {
+                UIPasteboard.general.string = link.absoluteString
+            } label: {
+                Label("复制链接", systemImage: "link")
+            }
+        }
+        if !item.isDirectory {
+            ShareLink(item: item.url) {
+                Label("分享", systemImage: "square.and.arrow.up")
+            }
+        }
+        Divider()
+        Button {
+            nameText = item.name
+            nameAction = .rename(item)
+        } label: {
+            Label("重命名", systemImage: "pencil")
+        }
+        Button(role: .destructive) {
+            deleteTarget = item
+        } label: {
+            Label("删除", systemImage: "trash")
+        }
+    }
+
+    private var summary: some View {
+        let files = displayed.filter { !$0.isDirectory }
+        let total = files.reduce(Int64(0)) { $0 + $1.size }
+        return Text("\(displayed.count) 项 · 文件共 \(Format.bytes(total))")
+            .font(.footnote)
+            .foregroundColor(.secondary)
+    }
+
+    @ViewBuilder
+    private var emptyState: some View {
+        if !query.isEmpty {
+            VStack(spacing: 8) {
+                Image(systemName: "magnifyingglass")
+                    .font(.system(size: 36))
+                    .foregroundColor(.secondary)
+                Text("没有找到“\(query)”")
+                    .font(.headline)
+            }
+        } else if !isRoot || items.isEmpty {
+            VStack(spacing: 12) {
+                IconBadge(systemName: "tray.and.arrow.down.fill", color: Theme.brandBlue, size: 64)
+                Text("这里还没有文件")
+                    .font(.headline)
+                Text("轻点右上角 + 导入网页文件、文件夹或 zip，\n也可以在电脑浏览器中拖拽上传。")
+                    .font(.subheadline)
+                    .foregroundColor(.secondary)
+                    .multilineTextAlignment(.center)
+                Button {
+                    importTypes = [.item]
+                    showImporter = true
+                } label: {
+                    Label("导入文件", systemImage: "plus")
+                        .font(.headline)
+                        .padding(.horizontal, 6)
+                }
+                .buttonStyle(.borderedProminent)
+                .padding(.top, 4)
+            }
+            .padding(32)
+        }
+    }
+
+    // MARK: - 菜单
+
+    private var optionsMenu: some View {
+        Menu {
+            Picker("视图", selection: $gridMode) {
+                Label("列表", systemImage: "list.bullet").tag(false)
+                Label("网格", systemImage: "square.grid.2x2").tag(true)
+            }
+            Picker("排序", selection: $sortOrder) {
+                ForEach(SortOrder.allCases) { order in
+                    Text(order.title).tag(order)
+                }
+            }
+        } label: {
+            Image(systemName: gridMode ? "square.grid.2x2" : "list.bullet")
+        }
+        .accessibilityLabel("视图与排序")
     }
 
     private var addMenu: some View {
@@ -253,8 +401,11 @@ struct FileBrowserView: View {
                 Label("新建 HTML 文件", systemImage: "chevron.left.forwardslash.chevron.right")
             }
         } label: {
-            Image(systemName: "plus")
+            Image(systemName: "plus.circle.fill")
+                .symbolRenderingMode(.hierarchical)
+                .font(.title3)
         }
+        .accessibilityLabel("添加")
     }
 
     // MARK: - 操作
@@ -263,57 +414,62 @@ struct FileBrowserView: View {
         items = FileStore.contents(of: directory)
     }
 
-    private func open(_ item: FileItem) {
-        if item.isTextFile && !item.isHTML && item.url.pathExtension.lowercased() != "svg" {
+    /// 轻点文件：网页、图片、视频等在浏览器中打开；纯文本文件进入编辑器
+    private func activate(_ item: FileItem) {
+        let ext = item.url.pathExtension.lowercased()
+        if item.isTextFile && !item.isHTML && ext != "svg" {
             editingItem = item
         } else {
-            preview(url: item.url, isDirectory: false)
+            openInBrowser(item)
         }
     }
 
-    private func preview(url: URL, isDirectory: Bool) {
-        if server.isRunning, var target = server.previewURL(for: url) {
-            if isDirectory && !target.absoluteString.hasSuffix("/") {
-                target = URL(string: target.absoluteString + "/") ?? target
-            }
-            browserTarget = BrowserTarget(url: target)
+    private func openInBrowser(_ item: FileItem) {
+        guard var url = server.webURL(for: item.url) else {
+            message = "该项目不在当前网站（\(server.siteRootDisplay)）中，无法通过网址访问。可以长按它所在的文件夹，选择“设为网站根目录”。"
             return
         }
-        // 服务器未运行，或文件不在当前网站目录内：直接以本地文件方式打开
-        var fileURL = url
-        if isDirectory {
-            fileURL = url.appendingPathComponent("index.html")
-            guard FileManager.default.fileExists(atPath: fileURL.path) else {
-                message = server.isRunning
-                    ? "该文件夹不在当前网站（\(server.siteRootDisplay)）中，且没有 index.html。"
-                    : "服务器未运行，且该文件夹中没有 index.html。请先在“服务器”页启动服务。"
-                return
-            }
+        if item.isDirectory && !url.absoluteString.hasSuffix("/") {
+            url = URL(string: url.absoluteString + "/") ?? url
         }
-        browserTarget = BrowserTarget(url: fileURL, readAccessURL: FileStore.rootURL)
+        server.openInBrowser(url)
     }
 
     private func handleImport(_ result: Result<[URL], Error>) {
         switch result {
         case .success(let urls):
             guard !urls.isEmpty else { return }
-            let directory = directory
+            // zip 会自动解压到独立文件夹；剩下的普通文件超过一个时，询问是否放进新文件夹
             let extractZips = server.settings.autoExtractZip
-            runInBackground {
-                let summary = FileStore.importItems(urls, into: directory, extractZips: extractZips)
-                // 普通导入成功时不打扰，解压或失败时才提示
-                return summary.failures.isEmpty && summary.extractedFiles == 0 ? nil : summary.message
+            let looseFiles = urls.filter { !(extractZips && $0.pathExtension.lowercased() == "zip") }
+            if importTypes != [.folder] && looseFiles.count > 1 {
+                folderNameText = FileStore.defaultFolderName(for: urls)
+                pendingImport = urls
+            } else {
+                startImport(urls, newFolderName: nil)
             }
         case .failure(let error):
             message = error.localizedDescription
         }
     }
 
+    private func startImport(_ urls: [URL], newFolderName: String?) {
+        guard !urls.isEmpty else { return }
+        let directory = directory
+        let extractZips = server.settings.autoExtractZip
+        runInBackground {
+            let summary = FileStore.importItems(urls, into: directory, extractZips: extractZips, newFolderName: newFolderName)
+            // 普通导入成功时不打扰，解压、新建文件夹或失败时才提示
+            let quiet = summary.failures.isEmpty && summary.extractedFiles == 0 && summary.folders.isEmpty
+            return quiet ? nil : summary.message
+        }
+    }
+
     private func extract(_ item: FileItem) {
         runInBackground {
             do {
-                let result = try FileStore.extractZip(item)
-                var text = "已解压 \(result.files) 个文件"
+                let (result, folder) = try FileStore.extractZip(item)
+                var text = "已解压 \(result.files) 个文件到文件夹「\(folder.lastPathComponent)」"
                 if result.skipped > 0 {
                     text += "，跳过 \(result.skipped) 项（隐藏文件、符号链接或不安全的路径）"
                 }
@@ -368,36 +524,64 @@ struct FileBrowserView: View {
     }
 }
 
-private struct FileRow: View {
+// MARK: - 子视图
+
+/// 根目录顶部的“当前网站”横幅
+private struct SiteBanner: View {
+    @EnvironmentObject private var server: ServerManager
+
+    var body: some View {
+        HStack(spacing: 14) {
+            Image(systemName: "globe")
+                .font(.system(size: 22, weight: .semibold))
+                .frame(width: 46, height: 46)
+                .background(Color.white.opacity(0.2), in: RoundedRectangle(cornerRadius: 13, style: .continuous))
+            VStack(alignment: .leading, spacing: 3) {
+                Text("当前网站")
+                    .font(.caption.weight(.semibold))
+                    .opacity(0.85)
+                Text(server.siteRootDisplay)
+                    .font(.headline)
+                    .lineLimit(1)
+            }
+            Spacer(minLength: 8)
+            Button {
+                server.openInBrowser(server.localURL)
+            } label: {
+                Label("打开", systemImage: "safari.fill")
+                    .font(.subheadline.weight(.bold))
+                    .foregroundColor(Theme.brandBlue)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 9)
+                    .background(Color.white, in: Capsule())
+            }
+            .buttonStyle(.plain)
+        }
+        .foregroundColor(.white)
+        .padding(14)
+        .background(Theme.brandGradient, in: RoundedRectangle(cornerRadius: Theme.cardRadius, style: .continuous))
+    }
+}
+
+private struct FileRowLabel: View {
     let item: FileItem
     let isSiteRoot: Bool
 
-    private static let sizeFormatter: ByteCountFormatter = {
-        let formatter = ByteCountFormatter()
-        formatter.countStyle = .file
-        return formatter
-    }()
-
     var body: some View {
+        let kind = isSiteRoot ? FileKind(symbol: "globe", color: Theme.brandPurple, label: "网站") : FileKind.of(item)
         HStack(spacing: 12) {
-            Image(systemName: icon)
-                .font(.title3)
-                .foregroundColor(item.isDirectory ? Color.accentColor : Color.secondary)
-                .frame(width: 28)
-            VStack(alignment: .leading, spacing: 2) {
+            IconBadge(systemName: kind.symbol, color: kind.color, size: 38)
+            VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: 6) {
                     Text(item.name)
-                        .lineLimit(2)
+                        .font(.body.weight(.medium))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
                     if isSiteRoot {
-                        Text("网站根目录")
-                            .font(.caption2.weight(.semibold))
-                            .foregroundColor(.white)
-                            .padding(.horizontal, 5)
-                            .padding(.vertical, 1)
-                            .background(Color.accentColor, in: RoundedRectangle(cornerRadius: 4))
+                        SiteRootTag()
                     }
                 }
-                Text(subtitle)
+                Text(subtitle(kind))
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
@@ -405,28 +589,59 @@ private struct FileRow: View {
         .padding(.vertical, 2)
     }
 
-    private var subtitle: String {
+    private func subtitle(_ kind: FileKind) -> String {
         let date = item.modified.map { $0.formatted(date: .abbreviated, time: .shortened) } ?? ""
-        if item.isDirectory {
-            return date
-        }
-        return Self.sizeFormatter.string(fromByteCount: item.size) + " · " + date
+        if item.isDirectory { return date }
+        return "\(kind.label) · \(Format.bytes(item.size)) · \(date)"
     }
+}
 
-    private var icon: String {
-        if item.isDirectory { return isSiteRoot ? "globe" : "folder.fill" }
-        switch item.url.pathExtension.lowercased() {
-        case "html", "htm": return "globe"
-        case "css": return "paintbrush"
-        case "js", "mjs", "ts", "jsx", "tsx", "vue": return "curlybraces"
-        case "json", "xml", "webmanifest", "map": return "doc.text"
-        case "png", "jpg", "jpeg", "gif", "webp", "svg", "ico", "avif", "heic", "bmp": return "photo"
-        case "mp4", "mov", "m4v", "webm": return "film"
-        case "mp3", "m4a", "wav", "aac", "ogg", "flac": return "music.note"
-        case "woff", "woff2", "ttf", "otf": return "textformat"
-        case "pdf": return "doc.richtext"
-        case "zip": return "doc.zipper"
-        default: return "doc"
+private struct FileTile: View {
+    let item: FileItem
+    let isSiteRoot: Bool
+
+    var body: some View {
+        let kind = isSiteRoot ? FileKind(symbol: "globe", color: Theme.brandPurple, label: "网站") : FileKind.of(item)
+        VStack(spacing: 8) {
+            ZStack(alignment: .topTrailing) {
+                Image(systemName: kind.symbol)
+                    .font(.system(size: 28, weight: .semibold))
+                    .foregroundColor(.white)
+                    .frame(width: 64, height: 64)
+                    .background(kind.color.gradient, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                if isSiteRoot {
+                    Image(systemName: "star.fill")
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundColor(.white)
+                        .padding(5)
+                        .background(Color.orange, in: Circle())
+                        .offset(x: 6, y: -6)
+                }
+            }
+            Text(item.name)
+                .font(.caption.weight(.medium))
+                .lineLimit(2)
+                .multilineTextAlignment(.center)
+                .frame(height: 32, alignment: .top)
+            Text(item.isDirectory ? kind.label : Format.bytes(item.size))
+                .font(.caption2)
+                .foregroundColor(.secondary)
         }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 14)
+        .padding(.horizontal, 6)
+        .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .contentShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+    }
+}
+
+private struct SiteRootTag: View {
+    var body: some View {
+        Text("网站根目录")
+            .font(.caption2.weight(.bold))
+            .foregroundColor(.white)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
+            .background(Theme.brandGradient, in: Capsule())
     }
 }

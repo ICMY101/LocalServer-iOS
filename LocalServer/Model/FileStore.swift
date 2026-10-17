@@ -83,21 +83,54 @@ enum FileStore {
     struct ImportSummary {
         var imported = 0
         var extractedFiles = 0
+        /// 新建或解压出的文件夹名称
+        var folders: [String] = []
         var failures: [String] = []
 
         var message: String {
             var parts: [String] = []
             if imported > 0 { parts.append("已导入 \(imported) 项") }
             if extractedFiles > 0 { parts.append("解压出 \(extractedFiles) 个文件") }
+            if !folders.isEmpty { parts.append("位于文件夹「" + folders.joined(separator: "」「") + "」") }
             if !failures.isEmpty { parts.append("失败：\n" + failures.joined(separator: "\n")) }
             return parts.isEmpty ? "没有导入任何文件" : parts.joined(separator: "，")
         }
     }
 
-    /// 把选中的文件或文件夹复制进来，同名项目会被覆盖；zip 可选择直接解压
-    static func importItems(_ urls: [URL], into directory: URL, extractZips: Bool) -> ImportSummary {
+    /// 多个文件放进新文件夹时的默认名称：单个文件用文件名，多个文件用导入时间
+    static func defaultFolderName(for urls: [URL]) -> String {
+        if urls.count == 1, let url = urls.first {
+            return ZipExtractor.safeFolderName(url.deletingPathExtension().lastPathComponent)
+        }
+        let formatter = DateFormatter()
+        formatter.dateFormat = "MM-dd HH.mm"
+        return "导入 " + formatter.string(from: Date())
+    }
+
+    /// 把选中的文件或文件夹复制进来，同名项目会被覆盖。
+    /// - extractZips: zip 解压到以其文件名命名的文件夹（zip 内本身只有一个顶层文件夹时直接使用它）
+    /// - newFolderName: 不为空时，先新建（或沿用）这个文件夹，再把所有项目放进去
+    static func importItems(
+        _ urls: [URL],
+        into directory: URL,
+        extractZips: Bool,
+        newFolderName: String? = nil
+    ) -> ImportSummary {
         let fileManager = FileManager.default
         var summary = ImportSummary()
+        var directory = directory
+        if let newFolderName {
+            let name = ZipExtractor.safeFolderName(newFolderName)
+            let folder = directory.appendingPathComponent(name, isDirectory: true)
+            do {
+                try fileManager.createDirectory(at: folder, withIntermediateDirectories: true)
+                directory = folder
+                summary.folders.append(name)
+            } catch {
+                summary.failures.append("无法创建文件夹「\(name)」：\(error.localizedDescription)")
+                return summary
+            }
+        }
         for source in urls {
             let accessing = source.startAccessingSecurityScopedResource()
             defer {
@@ -105,9 +138,16 @@ enum FileStore {
             }
             do {
                 if extractZips && source.pathExtension.lowercased() == "zip" {
-                    let result = try ZipExtractor.extract(source, into: directory)
+                    let extracted = try ZipExtractor.extractToFolder(
+                        source,
+                        in: directory,
+                        folderName: source.lastPathComponent
+                    )
                     summary.imported += 1
-                    summary.extractedFiles += result.files
+                    summary.extractedFiles += extracted.result.files
+                    if newFolderName == nil {
+                        summary.folders.append(extracted.folder.lastPathComponent)
+                    }
                 } else {
                     let destination = directory.appendingPathComponent(source.lastPathComponent)
                     if fileManager.fileExists(atPath: destination.path) {
@@ -123,8 +163,8 @@ enum FileStore {
         return summary
     }
 
-    static func extractZip(_ item: FileItem) throws -> ZipExtractor.Result {
-        try ZipExtractor.extract(item.url, into: item.url.deletingLastPathComponent())
+    static func extractZip(_ item: FileItem) throws -> (result: ZipExtractor.Result, folder: URL) {
+        try ZipExtractor.extractToFolder(item.url, in: item.url.deletingLastPathComponent(), folderName: item.name)
     }
 
     /// 其他 App 通过“用其他应用打开”传来的文件会被系统放在 Documents/Inbox，导入后清理掉

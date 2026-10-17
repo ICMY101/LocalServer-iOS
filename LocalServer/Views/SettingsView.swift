@@ -4,45 +4,29 @@ struct SettingsView: View {
     @EnvironmentObject private var server: ServerManager
     @State private var portText = ""
     @State private var portError: String?
-    @State private var passwordText = ""
     @State private var confirmRestore = false
-    @FocusState private var focusedField: Field?
-
-    private enum Field {
-        case port
-        case password
-    }
+    @FocusState private var portFocused: Bool
 
     var body: some View {
         NavigationStack {
             Form {
+                header
                 serviceSection
+                computerSection
                 siteSection
-                uploadSection
-                runtimeSection
-                rootSection
-
-                Section {
-                    LabeledContent("版本", value: appVersion)
-                }
+                powerSection
+                aboutSection
             }
             .navigationTitle("设置")
             .toolbar {
                 ToolbarItemGroup(placement: .keyboard) {
                     Spacer()
-                    Button("完成") { focusedField = nil }
+                    Button("完成") { portFocused = false }
                 }
             }
-            .onAppear {
-                portText = String(server.settings.port)
-                passwordText = server.settings.adminPassword
-            }
-            .onChange(of: focusedField) { field in
-                if field != .port { applyPort() }
-                if field != .password { applyPassword() }
-            }
-            .onChange(of: server.settings.adminPassword) { password in
-                if focusedField != .password { passwordText = password }
+            .onAppear { portText = String(server.settings.port) }
+            .onChange(of: portFocused) { focused in
+                if !focused { applyPort() }
             }
             .confirmationDialog("用示例页面覆盖 www 中的 index.html？", isPresented: $confirmRestore, titleVisibility: .visible) {
                 Button("覆盖", role: .destructive) {
@@ -55,110 +39,170 @@ struct SettingsView: View {
 
     // MARK: - 分组
 
+    private var header: some View {
+        Section {
+            HStack(spacing: 14) {
+                Image(systemName: "server.rack")
+                    .font(.system(size: 26, weight: .semibold))
+                    .foregroundColor(.white)
+                    .frame(width: 58, height: 58)
+                    .background(Theme.brandGradient, in: RoundedRectangle(cornerRadius: 15, style: .continuous))
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("本地服务器")
+                        .font(.title3.weight(.bold))
+                    Text("版本 \(appVersion)")
+                        .font(.subheadline)
+                        .foregroundColor(.secondary)
+                }
+            }
+            .padding(.vertical, 6)
+        }
+    }
+
     private var serviceSection: some View {
         Section {
             HStack {
-                Text("端口")
+                SettingsLabel("端口", systemName: "number", color: .gray)
                 Spacer()
                 TextField("8080", text: $portText)
                     .keyboardType(.numberPad)
                     .multilineTextAlignment(.trailing)
-                    .focused($focusedField, equals: .port)
-                    .frame(maxWidth: 120)
+                    .focused($portFocused)
+                    .font(.body.monospacedDigit())
+                    .frame(maxWidth: 110)
             }
-            Toggle("允许局域网访问", isOn: $server.settings.allowLAN)
-            Toggle("Bonjour 固定地址（.local）", isOn: $server.settings.bonjour)
-                .disabled(!server.settings.allowLAN)
-            Toggle("打开 App 时自动启动", isOn: $server.settings.autoStart)
+            Toggle(isOn: $server.settings.allowLAN) {
+                SettingsLabel("允许局域网访问", systemName: "wifi", color: Theme.brandBlue)
+            }
+            Toggle(isOn: $server.settings.bonjour) {
+                SettingsLabel("固定地址（Bonjour）", systemName: "dot.radiowaves.left.and.right", color: .purple)
+            }
+            .disabled(!server.settings.allowLAN)
+            Toggle(isOn: $server.settings.autoStart) {
+                SettingsLabel("打开 App 时自动启动", systemName: "power", color: .green)
+            }
         } header: {
             Text("服务")
         } footer: {
             if let portError {
                 Text(portError).foregroundColor(.red)
             } else {
-                Text("端口范围 1024–65535。关闭局域网访问后，只有本机（App 内浏览器）可以访问。Bonjour 会在局域网中广播服务，并尽量解析出一个 IP 变化后仍可使用的 .local 地址；部分网络或系统版本下可能解析不到。")
+                Text("端口范围 1024–65535。关闭局域网访问后，只有本机浏览器可以访问。Bonjour 会尽量解析出一个 IP 变化后仍可使用的 .local 地址，部分网络下可能解析不到。")
             }
+        }
+    }
+
+    private var computerSection: some View {
+        Section {
+            Toggle(isOn: $server.settings.webAdmin) {
+                SettingsLabel("电脑网页管理", systemName: "desktopcomputer", color: .indigo)
+            }
+            Toggle(isOn: $server.settings.requirePairing) {
+                SettingsLabel("需要配对码", systemName: "lock.shield.fill", color: .green)
+            }
+            .disabled(!server.settings.webAdmin)
+            NavigationLink {
+                PairedDevicesView()
+            } label: {
+                HStack {
+                    SettingsLabel("已配对设备", systemName: "laptopcomputer", color: .blue)
+                    Spacer()
+                    Text("\(server.pairedDevices.count)")
+                        .foregroundColor(.secondary)
+                }
+            }
+            .disabled(!server.settings.webAdmin || !server.settings.requirePairing)
+            Toggle(isOn: $server.settings.autoExtractZip) {
+                SettingsLabel("zip 自动解压", systemName: "doc.zipper", color: .orange)
+            }
+        } header: {
+            Text("电脑管理")
+        } footer: {
+            Text(server.settings.requirePairing
+                 ? "电脑浏览器打开 /__admin/ 时，手机上会弹出 6 位配对码，输入后即完成配对。每个浏览器只需配对一次。"
+                 : "⚠️ 未开启配对：同一局域网中的任何人都能上传或删除你的文件，建议开启。")
         }
     }
 
     private var siteSection: some View {
         Section {
-            Toggle("文件变化后自动刷新页面", isOn: $server.settings.liveReload)
-            Toggle("目录列表", isOn: $server.settings.directoryListing)
-            Toggle("单页应用回退（SPA）", isOn: $server.settings.spaFallback)
-            Toggle("允许跨域（CORS）", isOn: $server.settings.cors)
-        } header: {
-            Text("网站")
-        } footer: {
-            Text("自动刷新：上传或修改文件后，正在浏览的页面会自动重新加载（会在 HTML 中插入一小段脚本）。\n目录列表：文件夹中没有 index.html 时显示文件列表。\nSPA 回退：找不到的页面返回根目录的 index.html，适用于 Vue / React 等使用 history 路由的项目。")
-        }
-    }
-
-    private var uploadSection: some View {
-        Section {
-            Toggle("网页上传与管理", isOn: $server.settings.webAdmin)
-            HStack {
-                Text("访问密码")
-                Spacer()
-                TextField("未设置", text: $passwordText)
-                    .multilineTextAlignment(.trailing)
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
-                    .focused($focusedField, equals: .password)
-                    .submitLabel(.done)
-                    .onSubmit { applyPassword() }
-                    .font(.system(.body, design: .monospaced))
+            Toggle(isOn: $server.settings.liveReload) {
+                SettingsLabel("文件变化后自动刷新", systemName: "arrow.clockwise", color: .teal)
             }
-            .disabled(!server.settings.webAdmin)
-            HStack {
-                Button("随机生成") {
-                    focusedField = nil
-                    passwordText = ServerSettings.randomPassword()
-                    applyPassword()
-                }
-                Spacer()
-                if !server.settings.adminPassword.isEmpty {
-                    Button("取消密码", role: .destructive) {
-                        focusedField = nil
-                        passwordText = ""
-                        applyPassword()
-                    }
-                }
+            Toggle(isOn: $server.settings.directoryListing) {
+                SettingsLabel("目录列表", systemName: "list.bullet.rectangle", color: .blue)
             }
-            .buttonStyle(.borderless)
-            .disabled(!server.settings.webAdmin)
-            Toggle("导入 zip 时自动解压", isOn: $server.settings.autoExtractZip)
-        } header: {
-            Text("上传")
-        } footer: {
-            Text(server.settings.adminPassword.isEmpty
-                 ? "⚠️ 未设置访问密码：同一局域网中的任何人都能通过 /__admin/ 页面上传或删除文件。建议设置密码，公共 Wi-Fi 下建议关闭网页上传。"
-                 : "电脑浏览器打开 /__admin/ 时需要输入该密码。修改密码后，已登录的浏览器需要重新输入；连续输错 5 次会锁定 1 分钟。")
-        }
-    }
-
-    private var runtimeSection: some View {
-        Section {
-            Toggle("保持屏幕常亮", isOn: $server.settings.keepScreenOn)
-            Toggle("后台保活", isOn: $server.settings.backgroundAudio)
-        } header: {
-            Text("运行")
-        } footer: {
-            Text("iOS 会在 App 进入后台约 30 秒后挂起服务器。开启“后台保活”后会循环播放一段静音音频，让服务器在后台持续运行，但会增加耗电。")
-        }
-    }
-
-    private var rootSection: some View {
-        Section {
-            LabeledContent("当前网站", value: server.siteRootDisplay)
+            Toggle(isOn: $server.settings.spaFallback) {
+                SettingsLabel("单页应用回退（SPA）", systemName: "arrow.triangle.branch", color: .pink)
+            }
+            Toggle(isOn: $server.settings.cors) {
+                SettingsLabel("允许跨域（CORS）", systemName: "globe", color: .cyan)
+            }
+            HStack {
+                SettingsLabel("当前网站", systemName: "folder.fill", color: Theme.brandBlue)
+                Spacer()
+                Text(server.siteRootDisplay)
+                    .foregroundColor(.secondary)
+                    .lineLimit(1)
+            }
             if !server.settings.siteRoot.isEmpty {
                 Button("恢复以 www 为网站根目录") { server.setSiteRoot(nil) }
             }
-            Button("恢复示例首页") { confirmRestore = true }
         } header: {
-            Text("网站根目录")
+            Text("网站")
         } footer: {
-            Text("在“文件”页长按某个文件夹，选择“设为网站根目录”，就能在多个网站之间切换。网站文件也可以在系统「文件」App 的 我的 iPhone › 本地服务器 › www 中管理。")
+            Text("自动刷新：上传或修改文件后，浏览器中打开的页面会自动重新加载。\n目录列表：文件夹中没有 index.html 时显示文件列表。\nSPA 回退：找不到的页面返回 index.html，适用于 Vue / React 的 history 路由。\n多个网站：在“文件”页长按文件夹，选择“设为网站根目录”。")
+        }
+    }
+
+    private var powerSection: some View {
+        Section {
+            Toggle(isOn: $server.settings.backgroundAudio) {
+                SettingsLabel("后台保活", systemName: "bolt.fill", color: .yellow)
+            }
+            if server.settings.backgroundAudio {
+                Picker(selection: $server.settings.keepAliveIdleMinutes) {
+                    Text("5 分钟后").tag(5)
+                    Text("15 分钟后").tag(15)
+                    Text("30 分钟后").tag(30)
+                    Text("1 小时后").tag(60)
+                    Text("2 小时后").tag(120)
+                    Text("从不").tag(0)
+                } label: {
+                    SettingsLabel("无访问时停止", systemName: "timer", color: .orange)
+                }
+            }
+            Toggle(isOn: $server.settings.keepScreenOn) {
+                SettingsLabel("保持屏幕常亮", systemName: "sun.max.fill", color: .red)
+            }
+        } header: {
+            Text("运行与电量")
+        } footer: {
+            Text("网页在系统浏览器中打开时，本 App 会进入后台。开启“后台保活”后，App 只在后台时循环播放静音音频（不影响其他声音），让服务器持续运行；回到前台立即停止。设定时间内一直没有设备访问，就会自动停止以节省电量，重新打开 App 即可恢复。")
+        }
+    }
+
+    private var aboutSection: some View {
+        Section {
+            HStack {
+                SettingsLabel("文件位置", systemName: "externaldrive.fill", color: .gray)
+                Spacer()
+                Text("我的 iPhone › 本地服务器 › www")
+                    .font(.footnote)
+                    .foregroundColor(.secondary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
+            }
+            Button {
+                confirmRestore = true
+            } label: {
+                SettingsLabel("恢复示例首页", systemName: "arrow.counterclockwise", color: .gray)
+            }
+            .foregroundColor(.primary)
+        } header: {
+            Text("其他")
+        } footer: {
+            Text("也可以在系统「文件」App 中直接管理网站文件。")
         }
     }
 
@@ -181,14 +225,6 @@ struct SettingsView: View {
         portError = nil
         if port != server.settings.port {
             server.settings.port = port
-        }
-    }
-
-    private func applyPassword() {
-        let password = passwordText.trimmingCharacters(in: .whitespacesAndNewlines)
-        passwordText = password
-        if password != server.settings.adminPassword {
-            server.settings.adminPassword = password
         }
     }
 }

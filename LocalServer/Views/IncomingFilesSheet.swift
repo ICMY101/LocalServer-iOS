@@ -1,11 +1,13 @@
 import SwiftUI
 
-/// 其他 App 传来文件时，选择保存位置和是否解压
+/// 其他 App 传来文件时，选择保存位置、是否解压、是否放进新文件夹
 struct IncomingFilesSheet: View {
     @EnvironmentObject private var server: ServerManager
     @State private var folders: [String] = [""]
     @State private var destination = ""
     @State private var extractZips = true
+    @State private var useNewFolder = false
+    @State private var newFolderName = ""
     @State private var isImporting = false
 
     private var hasZip: Bool {
@@ -28,13 +30,17 @@ struct IncomingFilesSheet: View {
                             Text(folder.isEmpty ? "www（根目录）" : "www/" + folder).tag(folder)
                         }
                     }
+                    Toggle("放进新文件夹", isOn: $useNewFolder)
+                    if useNewFolder {
+                        TextField("文件夹名称", text: $newFolderName)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                    }
                     if hasZip {
                         Toggle("解压 zip", isOn: $extractZips)
                     }
                 } footer: {
-                    Text(hasZip && extractZips
-                         ? "zip 会解压到所选文件夹中，同名文件会被覆盖。"
-                         : "同名文件会被覆盖。")
+                    Text(footer)
                 }
             }
             .navigationTitle("导入文件")
@@ -61,17 +67,35 @@ struct IncomingFilesSheet: View {
             if folders.contains(server.settings.siteRoot) {
                 destination = server.settings.siteRoot
             }
+            // 多个普通文件默认放进同一个新文件夹，避免散落
+            let looseFiles = server.incomingURLs.filter { $0.pathExtension.lowercased() != "zip" }
+            useNewFolder = looseFiles.count > 1
+            newFolderName = FileStore.defaultFolderName(for: server.incomingURLs)
         }
+    }
+
+    private var footer: String {
+        var lines: [String] = []
+        if hasZip && extractZips {
+            lines.append("zip 会解压到以其文件名命名的文件夹中；如果 zip 里本身只有一个文件夹，就直接使用它。")
+        }
+        lines.append("同名文件会被覆盖。")
+        return lines.joined(separator: "\n")
     }
 
     private func performImport() {
         guard let directory = destination.isEmpty
             ? FileStore.rootURL
             : PathResolver.resolve(destination, in: FileStore.rootURL) else { return }
+        let name = newFolderName.trimmingCharacters(in: .whitespacesAndNewlines)
         isImporting = true
         Task {
             // 导入完成后 incomingURLs 被清空，面板自动关闭，结果由 ContentView 显示
-            await server.importIncoming(into: directory, extractZips: extractZips)
+            await server.importIncoming(
+                into: directory,
+                extractZips: extractZips,
+                newFolderName: useNewFolder && !name.isEmpty ? name : nil
+            )
             isImporting = false
         }
     }

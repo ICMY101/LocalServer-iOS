@@ -9,6 +9,7 @@ struct LocalServerApp: App {
         WindowGroup {
             ContentView()
                 .environmentObject(server)
+                .tint(Theme.brandBlue)
         }
         .onChange(of: scenePhase) { phase in
             server.handleScenePhase(phase)
@@ -34,6 +35,10 @@ struct ContentView: View {
             }) {
                 IncomingFilesSheet()
             }
+            // 电脑浏览器请求配对时弹出配对码
+            .sheet(item: $server.pairingRequest) { request in
+                PairingSheet(request: request)
+            }
             .alert("导入完成", isPresented: Binding(
                 get: { importMessage != nil },
                 set: { if !$0 { importMessage = nil } }
@@ -42,12 +47,22 @@ struct ContentView: View {
             } message: {
                 Text(importMessage ?? "")
             }
+            .alert("后台保活已关闭", isPresented: Binding(
+                get: { server.pendingBrowserURL != nil },
+                set: { if !$0 { server.pendingBrowserURL = nil } }
+            )) {
+                Button("开启保活并打开") { server.confirmBrowserOpen(enableKeepAlive: true) }
+                Button("仍然打开") { server.confirmBrowserOpen(enableKeepAlive: false) }
+                Button("取消", role: .cancel) {}
+            } message: {
+                Text("切换到浏览器后，本 App 会进入后台，约 30 秒后服务器会被系统暂停，页面将无法继续加载。开启后台保活可以避免这个问题。")
+            }
     }
 
     private var tabs: some View {
         TabView {
-            ServerView()
-                .tabItem { Label("服务器", systemImage: "server.rack") }
+            DashboardView()
+                .tabItem { Label("服务", systemImage: "antenna.radiowaves.left.and.right") }
 
             NavigationStack {
                 FileBrowserView(directory: FileStore.rootURL)
@@ -55,10 +70,10 @@ struct ContentView: View {
                         FileBrowserView(directory: url)
                     }
             }
-            .tabItem { Label("文件", systemImage: "folder") }
+            .tabItem { Label("文件", systemImage: "folder.fill") }
 
             SettingsView()
-                .tabItem { Label("设置", systemImage: "gearshape") }
+                .tabItem { Label("设置", systemImage: "gearshape.fill") }
         }
     }
 }

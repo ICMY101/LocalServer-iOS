@@ -4,12 +4,13 @@ import Network
 /// 单个 TCP 连接上的 HTTP/1.1 会话：解析请求、支持 keep-alive，文件按块流式发送。
 /// 所有方法都只在服务器的串行队列上调用。
 final class HTTPConnection {
-    typealias Handler = (HTTPRequest) -> HTTPResponse
+    /// 处理请求并通过回调返回响应；回调可以在任意线程、稍后调用（例如 Live Reload 长轮询）
+    typealias Handler = (HTTPRequest, @escaping (HTTPResponse) -> Void) -> Void
 
     private static let headerTerminator = Data("\r\n\r\n".utf8)
     private static let maxHeaderSize = 64 * 1024
     /// 超过该大小的请求体写入临时文件，避免占用大量内存
-    private static let memoryBodyLimit: Int64 = 2 * 1024 * 1024
+    private static let memoryBodyLimit: Int64 = 1024 * 1024
     private static let maxBodySize: Int64 = 8 * 1024 * 1024 * 1024
     private static let chunkSize = 256 * 1024
     private static let idleTimeout: TimeInterval = 30
@@ -80,7 +81,7 @@ final class HTTPConnection {
             guard let self, !self.closed else { return }
             self.idleTimer?.cancel()
             if let data, !data.isEmpty {
-                self.buffer.append(data)
+                self.receive(data)
             }
             if isComplete {
                 self.peerClosed = true
@@ -91,6 +92,40 @@ final class HTTPConnection {
             }
             self.process()
         }
+    }
+
+    private func receive(_ data: Data) {
+        // 正在接收请求体且缓冲区为空时直接写入，避免大文件上传时反复拷贝缓冲区
+        guard pendingHead != nil, bodyRemaining > 0, buffer.isEmpty else {
+            buffer.append(data)
+            return
+        }
+        let count = Int(min(bodyRemaining, Int64(data.count)))
+        if count == data.count {
+            if writeBody(data) {
+                bodyRemaining -= Int64(count)
+            }
+        } else {
+            if writeBody(data.prefix(count)) {
+                bodyRemaining -= Int64(count)
+            }
+            buffer = Data(data.dropFirst(count))
+        }
+    }
+
+    /// 写入请求体，失败时返回错误响应并关闭连接
+    private func writeBody(_ chunk: Data) -> Bool {
+        if let file = bodyFile {
+            do {
+                try file.write(contentsOf: chunk)
+            } catch {
+                respondAndClose(.error(507, "写入失败：\(error.localizedDescription)"))
+                return false
+            }
+        } else {
+            bodyData.append(chunk)
+        }
+        return true
     }
 
     private func needMore() {
@@ -151,17 +186,7 @@ final class HTTPConnection {
 
         if bodyRemaining > 0 && !buffer.isEmpty {
             let count = Int(min(bodyRemaining, Int64(buffer.count)))
-            let chunk = buffer.prefix(count)
-            if let file = bodyFile {
-                do {
-                    try file.write(contentsOf: chunk)
-                } catch {
-                    respondAndClose(.error(507, "写入失败：\(error.localizedDescription)"))
-                    return
-                }
-            } else {
-                bodyData.append(chunk)
-            }
+            guard writeBody(buffer.prefix(count)) else { return }
             consume(count: count)
             bodyRemaining -= Int64(count)
         }
@@ -192,15 +217,20 @@ final class HTTPConnection {
         bodyData = Data()
 
         let request = HTTPRequest(head: head, body: body, remoteAddress: remoteAddress)
-        let response = handler(request)
-        if case .file(let url) = body {
-            // 处理器可能已经把临时文件移走了，这里失败无妨
-            try? FileManager.default.removeItem(at: url)
+        // 处理器在服务器的并发队列上运行；在等待响应期间不再读取新数据
+        handler(request) { [weak self] response in
+            if case .file(let url) = body {
+                // 处理器可能已经把临时文件移走了，这里失败无妨
+                try? FileManager.default.removeItem(at: url)
+            }
+            guard let self else { return }
+            self.queue.async {
+                guard !self.closed else { return }
+                self.onResponse(request, response)
+                let keepAlive = head.wantsKeepAlive && !self.peerClosed
+                self.send(response, isHead: head.method == "HEAD", keepAlive: keepAlive)
+            }
         }
-        onResponse(request, response)
-
-        let keepAlive = head.wantsKeepAlive && !peerClosed
-        send(response, isHead: head.method == "HEAD", keepAlive: keepAlive)
     }
 
     // MARK: - 发送

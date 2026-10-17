@@ -1,6 +1,7 @@
 import Foundation
 
-/// `/__admin` 网页管理：在电脑浏览器里上传、删除、整理网站文件
+/// `/__admin` 网页管理：在电脑浏览器里上传、下载、删除、整理网站文件。
+/// 未配对的浏览器只能看到配对页，输入手机上显示的配对码后才能进入。
 final class AdminAPI {
     static let prefix = "/__admin"
     /// 修改类接口必须带这个请求头。跨站请求带自定义头会触发 CORS 预检，
@@ -8,57 +9,56 @@ final class AdminAPI {
     static let guardHeader = "x-localserver"
     static let sessionCookie = "ls_session"
 
-    private static let maxFailures = 5
-    private static let lockDuration: TimeInterval = 60
-    private static let maxSessions = 64
-
     private let root: URL
+    private let pairing: PairingStore
     private let fileManager = FileManager.default
-    private let onChange: () -> Void
+    /// 文件被修改后回调（在请求处理线程上调用）
+    var onChange: (() -> Void)?
 
-    /// 登录后的会话令牌，只保存在内存中，服务器重启或修改密码后失效
-    private var sessions: Set<String> = []
-    private var sessionPassword = ""
-    private var failures: [String: (count: Int, lockedUntil: Date)] = [:]
-
-    init(root: URL, onChange: @escaping () -> Void) {
+    init(root: URL, pairing: PairingStore) {
         self.root = root
-        self.onChange = onChange
+        self.pairing = pairing
     }
 
-    func handle(_ request: HTTPRequest, password: String, siteRoot: String) -> HTTPResponse {
-        if password != sessionPassword {
-            sessions.removeAll()
-            sessionPassword = password
-        }
+    func handle(_ request: HTTPRequest, requirePairing: Bool, siteRoot: String) -> HTTPResponse {
         let route = String(request.path.dropFirst(Self.prefix.count))
-        let authorized = password.isEmpty || (session(of: request).map { sessions.contains($0) } ?? false)
+        let token = session(of: request)
+        let authorized = !requirePairing || pairing.isPaired(token: token, address: request.remoteAddress)
 
         switch (request.method, route) {
         case ("GET", ""), ("HEAD", ""):
             return .redirect(to: Self.prefix + "/")
         case ("GET", "/"), ("HEAD", "/"):
-            var response = HTTPResponse.html(authorized ? AdminPage.html : AdminPage.loginHTML)
+            var response = HTTPResponse.html(authorized ? AdminPage.html : AdminPage.pairingHTML)
             response.setHeader("Cache-Control", "no-store")
             return response
         default:
             break
         }
 
-        if route == "/api/login" {
+        // 配对相关接口不需要已配对
+        if route == "/api/pair-request" || route == "/api/pair" {
             guard request.method == "POST", request.header(Self.guardHeader) == "1" else {
                 return failure("请求无效", status: 400)
             }
-            return login(request, password: password)
+            if !requirePairing || authorized {
+                return .json(["ok": true, "paired": true])
+            }
+            return route == "/api/pair" ? pair(request) : requestPairing(request)
         }
 
         guard authorized else {
-            let body: [String: Any] = ["error": "请先输入访问密码", "login": true]
+            let body: [String: Any] = ["error": "此浏览器尚未与手机配对", "pair": true]
             return .json(body, status: 401)
         }
 
-        if request.method == "GET" && route == "/api/list" {
-            return list(request, siteRoot: siteRoot)
+        switch (request.method, route) {
+        case ("GET", "/api/list"):
+            return list(request, siteRoot: siteRoot, requirePairing: requirePairing)
+        case ("GET", "/api/download"), ("HEAD", "/api/download"):
+            return download(request)
+        default:
+            break
         }
 
         guard request.header(Self.guardHeader) == "1" else {
@@ -75,63 +75,55 @@ final class AdminAPI {
             response = delete(request)
         case ("POST", "/api/move"):
             response = move(request)
-        case ("POST", "/api/logout"):
-            return logout(request)
+        case ("POST", "/api/unpair"):
+            return unpair(token: token)
         default:
             return failure("未知接口", status: 404)
         }
         if response.status < 300 {
-            onChange()
+            onChange?()
         }
         return response
     }
 
-    // MARK: - 登录
+    // MARK: - 配对
 
-    private func login(_ request: HTTPRequest, password: String) -> HTTPResponse {
-        let client = request.remoteAddress
-        let now = Date()
-        if let record = failures[client], record.lockedUntil > now {
-            let seconds = Int(record.lockedUntil.timeIntervalSince(now).rounded(.up))
-            return failure("尝试次数过多，请 \(seconds) 秒后再试", status: 429)
-        }
+    private func requestPairing(_ request: HTTPRequest) -> HTTPResponse {
+        pairing.requestPairing(address: request.remoteAddress, userAgent: request.header("user-agent"))
+        let body: [String: Any] = ["ok": true, "length": PairingStore.pinLength]
+        return .json(body)
+    }
 
+    private func pair(_ request: HTTPRequest) -> HTTPResponse {
         let supplied: String
-        switch request.body {
-        case .data(let data):
+        if case .data(let data) = request.body {
             supplied = String(data: data, encoding: .utf8) ?? ""
-        default:
+        } else {
             supplied = ""
         }
-
-        guard password.isEmpty || Self.constantTimeEquals(supplied, password) else {
-            var record = failures[client] ?? (count: 0, lockedUntil: Date.distantPast)
-            record.count += 1
-            if record.count >= Self.maxFailures {
-                record = (count: 0, lockedUntil: now.addingTimeInterval(Self.lockDuration))
-            }
-            failures[client] = record
-            return failure("密码错误", status: 403)
+        switch pairing.pair(pin: supplied, address: request.remoteAddress, userAgent: request.header("user-agent")) {
+        case .success(let token):
+            var response = HTTPResponse.json(["ok": true])
+            // 配对长期有效（一年），可在手机上随时取消
+            response.setHeader(
+                "Set-Cookie",
+                "\(Self.sessionCookie)=\(token); Path=\(Self.prefix); Max-Age=31536000; HttpOnly; SameSite=Strict"
+            )
+            return response
+        case .failure(.wrongPIN(let remaining)):
+            let body: [String: Any] = ["error": "配对码不正确，还可以再试 \(remaining) 次", "remaining": remaining]
+            return .json(body, status: 403)
+        case .failure(.locked(let seconds)):
+            let body: [String: Any] = ["error": "尝试次数过多，请 \(seconds) 秒后再试", "retryAfter": seconds]
+            return .json(body, status: 429)
+        case .failure(.expired):
+            return failure("配对码已过期，请查看手机上的新配对码", status: 410)
         }
-
-        failures[client] = nil
-        let token = (0..<32).map { _ in String(format: "%02x", UInt8.random(in: .min ... .max)) }.joined()
-        if sessions.count >= Self.maxSessions, let oldest = sessions.first {
-            sessions.remove(oldest)
-        }
-        sessions.insert(token)
-
-        var response = HTTPResponse.json(["ok": true])
-        response.setHeader(
-            "Set-Cookie",
-            "\(Self.sessionCookie)=\(token); Path=\(Self.prefix); Max-Age=2592000; HttpOnly; SameSite=Strict"
-        )
-        return response
     }
 
-    private func logout(_ request: HTTPRequest) -> HTTPResponse {
-        if let token = session(of: request) {
-            sessions.remove(token)
+    private func unpair(token: String?) -> HTTPResponse {
+        if let token {
+            pairing.revoke(token: token)
         }
         var response = HTTPResponse.json(["ok": true])
         response.setHeader("Set-Cookie", "\(Self.sessionCookie)=; Path=\(Self.prefix); Max-Age=0; HttpOnly; SameSite=Strict")
@@ -149,21 +141,30 @@ final class AdminAPI {
         return nil
     }
 
-    /// 比较耗时与内容无关，避免通过响应时间逐位猜测密码
-    static func constantTimeEquals(_ a: String, _ b: String) -> Bool {
-        let x = Array(a.utf8)
-        let y = Array(b.utf8)
-        guard x.count == y.count else { return false }
-        var difference: UInt8 = 0
-        for index in x.indices {
-            difference |= x[index] ^ y[index]
+    // MARK: - 下载
+
+    private func download(_ request: HTTPRequest) -> HTTPResponse {
+        guard let file = target(request.query["path"]), !isRoot(file) else {
+            return failure("路径无效")
         }
-        return difference == 0
+        var isDirectory: ObjCBool = false
+        guard fileManager.fileExists(atPath: file.path, isDirectory: &isDirectory), !isDirectory.boolValue,
+              let attributes = try? fileManager.attributesOfItem(atPath: file.path) else {
+            return failure("文件不存在", status: 404)
+        }
+        let size = (attributes[.size] as? NSNumber)?.uint64Value ?? 0
+        let name = file.lastPathComponent
+        let encoded = name.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? "download"
+        return HTTPResponse(status: 200, headers: [
+            ("Content-Type", "application/octet-stream"),
+            ("Content-Disposition", "attachment; filename*=UTF-8''\(encoded)"),
+            ("Cache-Control", "no-store"),
+        ], body: .file(file, offset: 0, length: size))
     }
 
     // MARK: - 文件接口
 
-    private func list(_ request: HTTPRequest, siteRoot: String) -> HTTPResponse {
+    private func list(_ request: HTTPRequest, siteRoot: String, requirePairing: Bool) -> HTTPResponse {
         guard let directory = target(request.query["path"]) else {
             return failure("路径无效")
         }
@@ -194,7 +195,7 @@ final class AdminAPI {
         let result: [String: Any] = [
             "path": request.query["path"] ?? "/",
             "siteRoot": siteRoot.isEmpty ? "/" : "/" + siteRoot,
-            "protected": !sessionPassword.isEmpty,
+            "paired": requirePairing,
             "items": items,
         ]
         return .json(result)
@@ -212,7 +213,7 @@ final class AdminAPI {
         }
 
         if request.query["extract"] == "1" && destination.pathExtension.lowercased() == "zip" {
-            return extract(request.body, into: parent)
+            return extract(request.body, into: parent, folderName: destination.lastPathComponent)
         }
 
         var isDirectory: ObjCBool = false
@@ -237,7 +238,7 @@ final class AdminAPI {
         return .json(["ok": true], status: 201)
     }
 
-    private func extract(_ body: HTTPBody, into directory: URL) -> HTTPResponse {
+    private func extract(_ body: HTTPBody, into directory: URL, folderName: String) -> HTTPResponse {
         let zipURL: URL
         var temporary: URL?
         switch body {
@@ -259,8 +260,13 @@ final class AdminAPI {
             if let temporary { try? fileManager.removeItem(at: temporary) }
         }
         do {
-            let result = try ZipExtractor.extract(zipURL, into: directory)
-            let body: [String: Any] = ["ok": true, "extracted": result.files, "skipped": result.skipped]
+            let (result, folder) = try ZipExtractor.extractToFolder(zipURL, in: directory, folderName: folderName)
+            let body: [String: Any] = [
+                "ok": true,
+                "extracted": result.files,
+                "skipped": result.skipped,
+                "folder": folder.lastPathComponent,
+            ]
             return .json(body, status: 201)
         } catch {
             return failure("解压失败：\(error.localizedDescription)", status: 422)

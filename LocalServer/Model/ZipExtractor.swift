@@ -21,18 +21,54 @@ enum ZipExtractor {
         }
     }
 
+    /// 解压到一个独立的文件夹中，避免文件散落在当前目录：
+    /// - zip 内只有一个顶层文件夹时，直接解压到 `parent`，得到的就是这个文件夹
+    /// - 否则在 `parent` 中新建以 `folderName` 命名的文件夹并解压到其中（已存在同名文件夹时合并覆盖）
+    static func extractToFolder(_ zipURL: URL, in parent: URL, folderName: String) throws -> (result: Result, folder: URL) {
+        let archive = try open(zipURL)
+        let encoding = pathEncoding(for: archive)
+
+        var topLevel = Set<String>()
+        var hasTopLevelFile = false
+        for entry in archive {
+            guard let components = sanitizedComponents(entry.path(using: encoding)) else { continue }
+            topLevel.insert(components[0])
+            if components.count == 1 && entry.type != .directory {
+                hasTopLevelFile = true
+            }
+        }
+
+        if topLevel.count == 1, !hasTopLevelFile, let only = topLevel.first {
+            let folder = parent.appendingPathComponent(only, isDirectory: true)
+            if !isRegularFile(folder) {
+                let result = try extract(archive, encoding: encoding, into: parent)
+                return (result, folder)
+            }
+        }
+
+        let folder = availableFolder(named: safeFolderName(folderName), in: parent)
+        let result = try extract(archive, encoding: encoding, into: folder)
+        return (result, folder)
+    }
+
+    /// 原样解压到 `destination`
     static func extract(_ zipURL: URL, into destination: URL) throws -> Result {
-        let archive: Archive
+        let archive = try open(zipURL)
+        return try extract(archive, encoding: pathEncoding(for: archive), into: destination)
+    }
+
+    private static func open(_ zipURL: URL) throws -> Archive {
         do {
-            archive = try Archive(url: zipURL, accessMode: .read)
+            return try Archive(url: zipURL, accessMode: .read)
         } catch {
             throw ExtractError.unreadable
         }
+    }
 
+    private static func extract(_ archive: Archive, encoding: String.Encoding, into destination: URL) throws -> Result {
         let fileManager = FileManager.default
-        try fileManager.createDirectory(at: destination, withIntermediateDirectories: true)
+        try createDirectory(at: destination, fileManager: fileManager)
         let rootPath = destination.standardizedFileURL.path
-        let encoding = pathEncoding(for: archive)
         var result = Result()
 
         for entry in archive {
@@ -45,8 +81,7 @@ enum ZipExtractor {
                 target.appendPathComponent(component)
             }
             // 防御性检查：最终路径必须仍在目标目录内
-            let targetPath = target.standardizedFileURL.path
-            guard targetPath.hasPrefix(rootPath + "/") else {
+            guard target.standardizedFileURL.path.hasPrefix(rootPath + "/") else {
                 result.skipped += 1
                 continue
             }
@@ -56,8 +91,7 @@ enum ZipExtractor {
                 try createDirectory(at: target, fileManager: fileManager)
             case .file:
                 try createDirectory(at: target.deletingLastPathComponent(), fileManager: fileManager)
-                var isDirectory: ObjCBool = false
-                if fileManager.fileExists(atPath: target.path, isDirectory: &isDirectory) {
+                if fileManager.fileExists(atPath: target.path) {
                     try fileManager.removeItem(at: target)
                 }
                 _ = try archive.extract(entry, to: target)
@@ -98,6 +132,37 @@ enum ZipExtractor {
     static let gb18030 = String.Encoding(rawValue: CFStringConvertEncodingToNSStringEncoding(
         CFStringEncoding(CFStringEncodings.GB_18030_2000.rawValue)
     ))
+
+    /// 由 zip 文件名得到文件夹名：去掉扩展名和不允许的字符
+    static func safeFolderName(_ name: String) -> String {
+        var name = name
+        if name.lowercased().hasSuffix(".zip") {
+            name = String(name.dropLast(4))
+        }
+        name = name.replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: ":", with: "_")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        while name.hasPrefix(".") {
+            name.removeFirst()
+        }
+        return name.isEmpty ? "解压文件" : name
+    }
+
+    /// 同名文件夹可以合并；若被同名的普通文件占用，则改用“名称 2”“名称 3”……
+    private static func availableFolder(named name: String, in parent: URL) -> URL {
+        var candidate = parent.appendingPathComponent(name, isDirectory: true)
+        var index = 2
+        while isRegularFile(candidate) {
+            candidate = parent.appendingPathComponent("\(name) \(index)", isDirectory: true)
+            index += 1
+        }
+        return candidate
+    }
+
+    private static func isRegularFile(_ url: URL) -> Bool {
+        var isDirectory: ObjCBool = false
+        return FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory) && !isDirectory.boolValue
+    }
 
     private static func createDirectory(at url: URL, fileManager: FileManager) throws {
         var isDirectory: ObjCBool = false
