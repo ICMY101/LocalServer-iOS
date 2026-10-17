@@ -18,7 +18,7 @@ struct ServerSettings: Codable, Equatable {
     var backgroundAudio = true
     /// 后台保活时，连续多少分钟没有请求就停止保活让系统挂起 App；0 表示一直保活
     var keepAliveIdleMinutes = 15
-    /// 已关闭的站点（www 下的文件夹名），关闭后无法访问
+    /// 3.0 中保存的已关闭站点；现在改为保存在站点文件夹内，启动时迁移后清空
     var disabledSites: [String] = []
     /// 已拉黑的访问设备 IP，拉黑后拒绝其所有连接
     var blockedClients: [String] = []
@@ -32,13 +32,8 @@ struct ServerSettings: Codable, Equatable {
             webAdmin: webAdmin,
             cors: cors,
             liveReload: liveReload,
-            requirePairing: requirePairing,
-            disabledSites: Set(disabledSites)
+            requirePairing: requirePairing
         )
-    }
-
-    func isSiteEnabled(_ name: String) -> Bool {
-        !disabledSites.contains(name)
     }
 
     func isBlocked(_ client: String) -> Bool {

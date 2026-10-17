@@ -20,7 +20,7 @@ final class AdminAPI {
         self.pairing = pairing
     }
 
-    func handle(_ request: HTTPRequest, requirePairing: Bool, disabledSites: Set<String> = []) -> HTTPResponse {
+    func handle(_ request: HTTPRequest, requirePairing: Bool) -> HTTPResponse {
         let route = String(request.path.dropFirst(Self.prefix.count))
         let token = session(of: request)
         let authorized = !requirePairing || pairing.isPaired(token: token, address: request.remoteAddress)
@@ -54,9 +54,11 @@ final class AdminAPI {
 
         switch (request.method, route) {
         case ("GET", "/api/list"):
-            return list(request, disabledSites: disabledSites, requirePairing: requirePairing)
+            return list(request, requirePairing: requirePairing)
         case ("GET", "/api/download"), ("HEAD", "/api/download"):
             return download(request)
+        case ("GET", "/api/zip"):
+            return zipDownload(request)
         default:
             break
         }
@@ -74,7 +76,11 @@ final class AdminAPI {
         case ("POST", "/api/delete"):
             response = delete(request)
         case ("POST", "/api/move"):
-            response = move(request)
+            response = transfer(request, copy: false)
+        case ("POST", "/api/copy"):
+            response = transfer(request, copy: true)
+        case ("POST", "/api/site"):
+            response = setSite(request)
         case ("POST", "/api/unpair"):
             return unpair(token: token)
         default:
@@ -164,7 +170,7 @@ final class AdminAPI {
 
     // MARK: - 文件接口
 
-    private func list(_ request: HTTPRequest, disabledSites: Set<String>, requirePairing: Bool) -> HTTPResponse {
+    private func list(_ request: HTTPRequest, requirePairing: Bool) -> HTTPResponse {
         guard let directory = target(request.query["path"]) else {
             return failure("路径无效")
         }
@@ -194,7 +200,7 @@ final class AdminAPI {
         }
         let result: [String: Any] = [
             "path": request.query["path"] ?? "/",
-            "disabledSites": Array(disabledSites),
+            "disabledSites": SiteMarker.disabledSites(in: root),
             "paired": requirePairing,
             "items": items,
         ]
@@ -300,27 +306,91 @@ final class AdminAPI {
         return .json(["ok": true])
     }
 
-    private func move(_ request: HTTPRequest) -> HTTPResponse {
+    /// 复制或移动：from、to 都是完整路径。
+    /// 目标已存在时返回 409；带 conflict=overwrite 覆盖，conflict=keep 保留两者（自动改名）
+    private func transfer(_ request: HTTPRequest, copy: Bool) -> HTTPResponse {
         guard let source = target(request.query["from"]), !isRoot(source),
               let destination = target(request.query["to"]), !isRoot(destination) else {
             return failure("路径无效")
         }
-        guard fileManager.fileExists(atPath: source.path) else {
-            return failure("文件不存在", status: 404)
-        }
-        guard !fileManager.fileExists(atPath: destination.path) else {
-            return failure("目标已存在", status: 409)
+        let policy: FileStore.ConflictPolicy
+        switch request.query["conflict"] {
+        case "overwrite": policy = .overwrite
+        case "keep": policy = .keepBoth
+        default: policy = .fail
         }
         do {
-            try fileManager.createDirectory(
-                at: destination.deletingLastPathComponent(),
-                withIntermediateDirectories: true
-            )
-            try fileManager.moveItem(at: source, to: destination)
+            let result = try FileStore.transfer(source, to: destination, copy: copy, policy: policy)
+            let body: [String: Any] = ["ok": true, "name": result.lastPathComponent]
+            return .json(body)
+        } catch let error as FileStore.TransferError {
+            switch error {
+            case .exists(let name):
+                let body: [String: Any] = ["error": error.localizedDescription, "conflict": true, "name": name]
+                return .json(body, status: 409)
+            case .notFound:
+                return failure(error.localizedDescription, status: 404)
+            case .intoItself, .root:
+                return failure(error.localizedDescription)
+            }
         } catch {
-            return failure("移动失败：\(error.localizedDescription)", status: 500)
+            return failure("\(copy ? "复制" : "移动")失败：\(error.localizedDescription)", status: 500)
         }
-        return .json(["ok": true])
+    }
+
+    /// 开启或关闭站点：name 为 www 下的文件夹名，enabled 为 1 或 0
+    private func setSite(_ request: HTTPRequest) -> HTTPResponse {
+        guard let name = request.query["name"], Router.isValidSiteName(name),
+              let folder = target("/" + name) else {
+            return failure("站点名称无效")
+        }
+        var isDirectory: ObjCBool = false
+        guard fileManager.fileExists(atPath: folder.path, isDirectory: &isDirectory), isDirectory.boolValue else {
+            return failure("站点不存在", status: 404)
+        }
+        let enabled = request.query["enabled"] != "0"
+        do {
+            try SiteMarker.setEnabled(enabled, for: folder)
+        } catch {
+            return failure("操作失败：\(error.localizedDescription)", status: 500)
+        }
+        let body: [String: Any] = ["ok": true, "enabled": enabled]
+        return .json(body)
+    }
+
+    /// 把一个或多个项目打包成 zip 下载。paths 为 JSON 数组，例如 ["/blog","/a.html"]
+    private func zipDownload(_ request: HTTPRequest) -> HTTPResponse {
+        guard let raw = request.query["paths"],
+              let list = try? JSONSerialization.jsonObject(with: Data(raw.utf8)) as? [String],
+              !list.isEmpty else {
+            return failure("请选择要下载的项目")
+        }
+        var urls: [URL] = []
+        for path in list {
+            guard let url = target(path), !isRoot(url), fileManager.fileExists(atPath: url.path) else {
+                return failure("「\(path)」不存在", status: 404)
+            }
+            urls.append(url)
+        }
+        let staging = fileManager.temporaryDirectory.appendingPathComponent("download-\(UUID().uuidString)", isDirectory: true)
+        let zipURL: URL
+        do {
+            try fileManager.createDirectory(at: staging, withIntermediateDirectories: true)
+            zipURL = try FileStore.compress(urls, into: staging)
+        } catch {
+            try? fileManager.removeItem(at: staging)
+            return failure("打包失败：\(error.localizedDescription)", status: 500)
+        }
+        let size = ((try? fileManager.attributesOfItem(atPath: zipURL.path))?[.size] as? NSNumber)?.uint64Value ?? 0
+        let encoded = zipURL.lastPathComponent.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? "download.zip"
+        var response = HTTPResponse(status: 200, headers: [
+            ("Content-Type", "application/zip"),
+            ("Content-Disposition", "attachment; filename*=UTF-8''\(encoded)"),
+            ("Cache-Control", "no-store"),
+        ], body: .file(zipURL, offset: 0, length: size))
+        // 发送完成后删除临时文件
+        response.cleanupURL = staging
+        return response
     }
 
     // MARK: - 工具

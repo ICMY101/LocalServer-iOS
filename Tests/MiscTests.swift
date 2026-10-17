@@ -40,15 +40,19 @@ final class ServerSettingsTests: XCTestCase {
         let settings = try JSONDecoder().decode(ServerSettings.self, from: Data(json.utf8))
         XCTAssertEqual(settings.port, 8090)
         XCTAssertFalse(settings.requirePairing)
-        XCTAssertTrue(settings.isSiteEnabled("blog"))
+        XCTAssertEqual(settings.disabledSites, [])
     }
 
-    func testSiteAndBlockHelpers() {
+    func testDecodesLegacyDisabledSitesForMigration() throws {
+        // 3.0 把关闭的站点存在设置里，启动时会迁移为站点文件夹中的标记文件
+        let json = #"{"disabledSites":["old"]}"#
+        let settings = try JSONDecoder().decode(ServerSettings.self, from: Data(json.utf8))
+        XCTAssertEqual(settings.disabledSites, ["old"])
+    }
+
+    func testBlockHelpers() {
         var settings = ServerSettings()
-        settings.disabledSites = ["old"]
         settings.blockedClients = ["10.0.0.8"]
-        XCTAssertFalse(settings.isSiteEnabled("old"))
-        XCTAssertTrue(settings.isSiteEnabled("new"))
         XCTAssertTrue(settings.isBlocked("10.0.0.8"))
         XCTAssertFalse(settings.isBlocked("10.0.0.9"))
     }
@@ -62,11 +66,9 @@ final class ServerSettingsTests: XCTestCase {
     func testRouterConfigMapping() {
         var settings = ServerSettings()
         settings.requirePairing = false
-        settings.disabledSites = ["a", "b"]
         settings.spaFallback = true
         let config = settings.routerConfig
         XCTAssertFalse(config.requirePairing)
-        XCTAssertEqual(config.disabledSites, ["a", "b"])
         XCTAssertTrue(config.spaFallback)
     }
 }
@@ -254,5 +256,122 @@ final class LiveReloadTests: XCTestCase {
         let third = LiveReload().version(of: directory.url)
         try FileManager.default.removeItem(at: directory.url.appendingPathComponent("new"))
         XCTAssertNotEqual(third, LiveReload().version(of: directory.url))
+    }
+}
+
+final class SiteMarkerTests: XCTestCase {
+    func testMarkerTravelsWithFolder() throws {
+        let directory = try TemporaryDirectory()
+        try directory.write("blog/index.html", "x")
+        try directory.write("demo/index.html", "x")
+        let blog = directory.url.appendingPathComponent("blog")
+
+        XCTAssertFalse(SiteMarker.isDisabled(blog))
+        try SiteMarker.setEnabled(false, for: blog)
+        XCTAssertTrue(SiteMarker.isDisabled(blog))
+        XCTAssertEqual(SiteMarker.disabledSites(in: directory.url), ["blog"])
+
+        // 重命名后状态依然保留
+        let renamed = directory.url.appendingPathComponent("blog 2")
+        try FileManager.default.moveItem(at: blog, to: renamed)
+        XCTAssertTrue(SiteMarker.isDisabled(renamed))
+        XCTAssertEqual(SiteMarker.disabledSites(in: directory.url), ["blog 2"])
+
+        try SiteMarker.setEnabled(true, for: renamed)
+        XCTAssertFalse(SiteMarker.isDisabled(renamed))
+        XCTAssertEqual(SiteMarker.disabledSites(in: directory.url), [])
+        // 重复设置不会出错
+        try SiteMarker.setEnabled(true, for: renamed)
+    }
+
+    func testMarkerIsHiddenFromListings() throws {
+        let directory = try TemporaryDirectory()
+        try directory.write("blog/index.html", "x")
+        let blog = directory.url.appendingPathComponent("blog")
+        try SiteMarker.setEnabled(false, for: blog)
+        XCTAssertEqual(FileStore.contents(of: blog).map(\.name), ["index.html"])
+    }
+}
+
+final class FileOperationTests: XCTestCase {
+    private var directory: TemporaryDirectory!
+
+    override func setUpWithError() throws {
+        directory = try TemporaryDirectory()
+    }
+
+    override func tearDown() {
+        directory = nil
+    }
+
+    private func url(_ path: String) -> URL {
+        directory.url.appendingPathComponent(path)
+    }
+
+    func testAvailableName() throws {
+        try directory.write("a.html", "1")
+        XCTAssertEqual(FileStore.availableName(for: "new.html", in: directory.url), "new.html")
+        XCTAssertEqual(FileStore.availableName(for: "a.html", in: directory.url), "a 2.html")
+        try directory.write("a 2.html", "2")
+        XCTAssertEqual(FileStore.availableName(for: "a.html", in: directory.url), "a 3.html")
+        XCTAssertEqual(FileStore.availableName(for: "a.html", in: directory.url, firstSuffix: " 副本"), "a 副本.html")
+        try directory.write("a 副本.html", "3")
+        XCTAssertEqual(FileStore.availableName(for: "a.html", in: directory.url, firstSuffix: " 副本"), "a 副本 2.html")
+    }
+
+    func testCopyAndMoveWithConflictPolicies() throws {
+        try directory.write("src/a.txt", "new")
+        try directory.write("dst/a.txt", "old")
+
+        XCTAssertThrowsError(try FileStore.transfer(url("src/a.txt"), into: url("dst"), copy: true, policy: .fail)) { error in
+            XCTAssertEqual(error as? FileStore.TransferError, .exists("a.txt"))
+        }
+
+        let kept = try FileStore.transfer(url("src/a.txt"), into: url("dst"), copy: true, policy: .keepBoth)
+        XCTAssertEqual(kept.lastPathComponent, "a 2.txt")
+        XCTAssertEqual(directory.read("dst/a.txt"), "old")
+
+        try FileStore.transfer(url("src/a.txt"), into: url("dst"), copy: false, policy: .overwrite)
+        XCTAssertEqual(directory.read("dst/a.txt"), "new")
+        XCTAssertFalse(directory.exists("src/a.txt"))
+    }
+
+    func testMoveFolderIntoItselfIsRejected() throws {
+        try directory.write("site/sub/index.html", "x")
+        XCTAssertThrowsError(try FileStore.transfer(url("site"), into: url("site/sub"), copy: false, policy: .keepBoth)) { error in
+            XCTAssertEqual(error as? FileStore.TransferError, .intoItself)
+        }
+        XCTAssertTrue(directory.exists("site/sub/index.html"))
+    }
+
+    func testCopyToSameLocationCreatesDuplicate() throws {
+        try directory.write("page.html", "x")
+        let copy = try FileStore.transfer(url("page.html"), to: url("page.html"), copy: true, policy: .keepBoth)
+        XCTAssertEqual(copy.lastPathComponent, "page 副本.html")
+        // 移动到原位置不做任何事
+        let same = try FileStore.transfer(url("page.html"), to: url("page.html"), copy: false, policy: .fail)
+        XCTAssertEqual(same.lastPathComponent, "page.html")
+    }
+
+    func testCompressAndMeasure() throws {
+        try directory.write("site/index.html", "hello")
+        try directory.write("site/css/app.css", "body{}")
+        try directory.write("notes.txt", "n")
+
+        let single = try FileStore.compress([url("site")], into: directory.url)
+        XCTAssertEqual(single.lastPathComponent, "site.zip")
+        let multiple = try FileStore.compress([url("site"), url("notes.txt")], into: directory.url)
+        XCTAssertEqual(multiple.lastPathComponent, "归档.zip")
+
+        // 解压回来内容一致
+        let out = url("out")
+        _ = try ZipExtractor.extract(multiple, into: out)
+        XCTAssertEqual(directory.read("out/site/index.html"), "hello")
+        XCTAssertEqual(directory.read("out/notes.txt"), "n")
+
+        let size = FileStore.measure(url("site"))
+        XCTAssertEqual(size.files, 2)
+        XCTAssertEqual(size.folders, 1)
+        XCTAssertEqual(size.bytes, 11)
     }
 }

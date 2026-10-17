@@ -1,4 +1,5 @@
 import Foundation
+import ZIPFoundation
 
 struct FileItem: Identifiable, Hashable {
     let url: URL
@@ -73,6 +74,8 @@ enum FileStore {
         let url: URL
         let hasIndex: Bool
         let modified: Date?
+        /// 是否开启；状态保存在站点文件夹中的隐藏标记文件里
+        let enabled: Bool
 
         var id: String { name }
         /// 访问路径，例如 `/blog/`
@@ -89,7 +92,13 @@ enum FileStore {
                 let fileManager = FileManager.default
                 let hasIndex = fileManager.fileExists(atPath: item.url.appendingPathComponent("index.html").path)
                     || fileManager.fileExists(atPath: item.url.appendingPathComponent("index.htm").path)
-                return SiteInfo(name: item.name, url: item.url, hasIndex: hasIndex, modified: item.modified)
+                return SiteInfo(
+                    name: item.name,
+                    url: item.url,
+                    hasIndex: hasIndex,
+                    modified: item.modified,
+                    enabled: !SiteMarker.isDisabled(item.url)
+                )
             }
     }
 
@@ -290,6 +299,159 @@ enum FileStore {
         if path == basePath { return "" }
         guard path.hasPrefix(basePath + "/") else { return nil }
         return String(path.dropFirst(basePath.count + 1))
+    }
+
+    // MARK: - 复制、移动、压缩
+
+    /// 目标位置已存在同名项目时的处理方式
+    enum ConflictPolicy {
+        /// 报错，由调用方决定
+        case fail
+        /// 覆盖已有项目
+        case overwrite
+        /// 保留两者，新项目自动改名为“名称 2”
+        case keepBoth
+    }
+
+    enum TransferError: LocalizedError, Equatable {
+        case notFound
+        case exists(String)
+        case intoItself
+        case root
+
+        var errorDescription: String? {
+            switch self {
+            case .notFound: return "文件不存在"
+            case .exists(let name): return "已存在名为「\(name)」的项目"
+            case .intoItself: return "不能把文件夹移动或拷贝到它自己里面"
+            case .root: return "不能操作 www 根目录"
+            }
+        }
+    }
+
+    /// 在文件夹中找一个不冲突的名称，例如“首页 2.html”“首页 3.html”
+    static func availableName(for name: String, in directory: URL, firstSuffix: String = " 2") -> String {
+        let fileManager = FileManager.default
+        guard fileManager.fileExists(atPath: directory.appendingPathComponent(name).path) else { return name }
+        let ext = (name as NSString).pathExtension
+        let base = ext.isEmpty ? name : String(name.dropLast(ext.count + 1))
+        func candidate(_ suffix: String) -> String {
+            ext.isEmpty ? base + suffix : base + suffix + "." + ext
+        }
+        var result = candidate(firstSuffix)
+        // “名称 2”之后是“名称 3”；“名称 副本”之后是“名称 副本 2”
+        var index = firstSuffix == " 2" ? 2 : 1
+        while fileManager.fileExists(atPath: directory.appendingPathComponent(result).path) {
+            index += 1
+            result = candidate(firstSuffix == " 2" ? " \(index)" : firstSuffix + " \(index)")
+        }
+        return result
+    }
+
+    /// 复制或移动到指定的完整路径（包含新名称），返回最终位置
+    @discardableResult
+    static func transfer(_ source: URL, to destination: URL, copy: Bool, policy: ConflictPolicy) throws -> URL {
+        let fileManager = FileManager.default
+        guard fileManager.fileExists(atPath: source.path) else { throw TransferError.notFound }
+        let sourcePath = source.standardizedFileURL.path
+        let destinationPath = destination.standardizedFileURL.path
+        guard sourcePath != rootURL.standardizedFileURL.path else { throw TransferError.root }
+        if destinationPath == sourcePath {
+            // 移动到原位置无需操作；拷贝到原位置则自动创建副本
+            guard copy else { return source }
+        } else if destinationPath.hasPrefix(sourcePath + "/") {
+            throw TransferError.intoItself
+        }
+
+        let directory = destination.deletingLastPathComponent()
+        try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+        var target = destination
+        if fileManager.fileExists(atPath: target.path) {
+            switch policy {
+            case .fail:
+                throw TransferError.exists(target.lastPathComponent)
+            case .overwrite where destinationPath != sourcePath:
+                try fileManager.removeItem(at: target)
+            case .overwrite, .keepBoth:
+                // 拷贝到原位置时生成“名称 副本”，与 App 内的“创建副本”一致
+                let suffix = destinationPath == sourcePath ? " 副本" : " 2"
+                target = directory.appendingPathComponent(
+                    availableName(for: target.lastPathComponent, in: directory, firstSuffix: suffix)
+                )
+            }
+        }
+        if copy {
+            try fileManager.copyItem(at: source, to: target)
+        } else {
+            try fileManager.moveItem(at: source, to: target)
+        }
+        return target
+    }
+
+    /// 把项目复制或移动到文件夹中（保持原名），返回最终位置
+    @discardableResult
+    static func transfer(_ source: URL, into directory: URL, copy: Bool, policy: ConflictPolicy) throws -> URL {
+        try transfer(source, to: directory.appendingPathComponent(source.lastPathComponent), copy: copy, policy: policy)
+    }
+
+    /// 在同一文件夹中创建副本，例如“首页 副本.html”
+    @discardableResult
+    static func duplicate(_ item: FileItem) throws -> URL {
+        let directory = item.url.deletingLastPathComponent()
+        let name = availableName(for: item.name, in: directory, firstSuffix: " 副本")
+        let target = directory.appendingPathComponent(name)
+        try FileManager.default.copyItem(at: item.url, to: target)
+        return target
+    }
+
+    /// 把一个或多个项目压缩为 zip，返回 zip 的位置。
+    /// 单个项目保存为“名称.zip”，多个项目保存为“归档.zip”，都放在 directory 中。
+    @discardableResult
+    static func compress(_ urls: [URL], into directory: URL) throws -> URL {
+        guard let first = urls.first else { throw TransferError.notFound }
+        let fileManager = FileManager.default
+        let baseName = urls.count == 1 ? first.deletingPathExtension().lastPathComponent : "归档"
+        let destination = directory.appendingPathComponent(availableName(for: baseName + ".zip", in: directory))
+
+        if urls.count == 1 {
+            try fileManager.zipItem(at: first, to: destination, shouldKeepParent: true, compressionMethod: .deflate)
+            return destination
+        }
+        // 多个项目：先在临时文件夹中汇总（APFS 上复制几乎不占空间），再整体压缩
+        let staging = fileManager.temporaryDirectory.appendingPathComponent("zip-\(UUID().uuidString)", isDirectory: true)
+        try fileManager.createDirectory(at: staging, withIntermediateDirectories: true)
+        defer { try? fileManager.removeItem(at: staging) }
+        for url in urls {
+            try fileManager.copyItem(at: url, to: staging.appendingPathComponent(url.lastPathComponent))
+        }
+        try fileManager.zipItem(at: staging, to: destination, shouldKeepParent: false, compressionMethod: .deflate)
+        return destination
+    }
+
+    /// 文件或文件夹的总大小和文件数（不含隐藏文件）
+    static func measure(_ url: URL) -> (bytes: Int64, files: Int, folders: Int) {
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory) else { return (0, 0, 0) }
+        guard isDirectory.boolValue else {
+            let size = (try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0
+            return (Int64(size), 1, 0)
+        }
+        var bytes: Int64 = 0
+        var files = 0
+        var folders = 0
+        let keys: [URLResourceKey] = [.isDirectoryKey, .fileSizeKey]
+        if let enumerator = FileManager.default.enumerator(at: url, includingPropertiesForKeys: keys, options: [.skipsHiddenFiles]) {
+            for case let child as URL in enumerator {
+                let values = try? child.resourceValues(forKeys: Set(keys))
+                if values?.isDirectory == true {
+                    folders += 1
+                } else {
+                    files += 1
+                    bytes += Int64(values?.fileSize ?? 0)
+                }
+            }
+        }
+        return (bytes, files, folders)
     }
 
     /// 文件对应的访问路径，例如 `/blog/index.html`；不在 www 内时返回 nil

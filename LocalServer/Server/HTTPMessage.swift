@@ -93,11 +93,14 @@ struct HTTPRequest {
         path = rawPath.removingPercentEncoding ?? rawPath
 
         var query: [String: String] = [:]
+        // 查询参数按表单编码解码：浏览器的 URLSearchParams 会把空格编码成 +
+        func decode(_ component: Substring) -> String {
+            let text = String(component).replacingOccurrences(of: "+", with: " ")
+            return text.removingPercentEncoding ?? text
+        }
         for pair in rawQuery.split(separator: "&") {
             let kv = pair.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
-            let key = String(kv[0]).removingPercentEncoding ?? String(kv[0])
-            let value = kv.count > 1 ? (String(kv[1]).removingPercentEncoding ?? String(kv[1])) : ""
-            query[key] = value
+            query[decode(kv[0])] = kv.count > 1 ? decode(kv[1]) : ""
         }
         self.query = query
     }
@@ -121,6 +124,8 @@ struct HTTPResponse {
     var body: Body
     /// 响应所属的站点（仅用于统计，不会发送给浏览器）
     var site: String?
+    /// 发送完成（或失败）后要删除的临时文件或文件夹，例如临时打包的 zip
+    var cleanupURL: URL?
 
     init(status: Int, headers: [(String, String)] = [], body: Body = .empty) {
         self.status = status

@@ -252,12 +252,23 @@ private struct SiteRow: View {
                 .foregroundColor(.secondary)
             }
             Spacer(minLength: 8)
+            if !enabled {
+                PillTag(text: "已关闭")
+            }
+            Menu {
+                actions
+            } label: {
+                Image(systemName: "ellipsis")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundColor(.accentColor)
+                    .frame(width: 34, height: 34)
+                    .background(Color(.tertiarySystemFill), in: Circle())
+            }
+            .accessibilityLabel("更多操作")
             if enabled {
-                CircleIconButton(systemName: "arrow.up.right", label: "在浏览器中打开") {
+                CircleIconButton(systemName: "arrow.up.right", prominent: true, label: "在浏览器中打开") {
                     server.openInBrowser(server.siteURL(site))
                 }
-            } else {
-                PillTag(text: "已关闭")
             }
         }
         .padding(.horizontal, 18)
@@ -267,11 +278,21 @@ private struct SiteRow: View {
             if enabled {
                 server.openInBrowser(server.siteURL(site))
             } else {
-                server.showToast("「\(site.name)」已关闭，长按可以开启", systemName: "nosign")
+                server.showToast("「\(site.name)」已关闭，点 ⋯ 可以开启", systemName: "nosign")
             }
         }
-        .contextMenu {
-            if enabled {
+        .contextMenu { actions }
+    }
+
+    @ViewBuilder
+    private var actions: some View {
+        Button {
+            server.setSite(site.name, enabled: !enabled)
+        } label: {
+            Label(enabled ? "关闭站点" : "开启站点", systemImage: enabled ? "nosign" : "checkmark.circle")
+        }
+        if enabled {
+            Section {
                 Button {
                     server.openInBrowser(server.siteURL(site))
                 } label: {
@@ -288,11 +309,6 @@ private struct SiteRow: View {
                 } label: {
                     Label("二维码", systemImage: "qrcode")
                 }
-            }
-            Button {
-                server.setSite(site.name, enabled: !enabled)
-            } label: {
-                Label(enabled ? "关闭站点" : "开启站点", systemImage: enabled ? "nosign" : "checkmark.circle")
             }
         }
     }

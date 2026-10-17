@@ -1,7 +1,8 @@
 import SwiftUI
 import UniformTypeIdentifiers
 
-/// “文件”页：浏览、搜索、排序网站文件，支持列表和网格两种视图
+/// “文件”页：浏览、搜索、排序网站文件，支持列表和网格两种视图，
+/// 以及复制、移动、压缩、多选批量操作和站点开关
 struct FileBrowserView: View {
     let directory: URL
 
@@ -17,10 +18,14 @@ struct FileBrowserView: View {
     @State private var importTypes: [UTType] = [.item]
     @State private var nameAction: NameAction?
     @State private var nameText = ""
-    @State private var deleteTarget: FileItem?
+    @State private var deleteTargets: [FileItem] = []
     @State private var editingItem: FileItem?
+    @State private var infoItem: FileItem?
+    @State private var transferRequest: TransferRequest?
     @State private var message: String?
     @State private var isWorking = false
+    @State private var isSelecting = false
+    @State private var selection = Set<URL>()
     /// 一次选中多个文件时，等待用户决定是否放进新文件夹
     @State private var pendingImport: [URL]?
     @State private var folderNameText = ""
@@ -77,7 +82,17 @@ struct FileBrowserView: View {
         }
     }
 
+    private var selectedItems: [FileItem] {
+        displayed.filter { selection.contains($0.url) }
+    }
+
+    // MARK: - 主体（拆成几段，避免修饰符链过长影响编译速度）
+
     var body: some View {
+        sheets(alerts(base))
+    }
+
+    private var base: some View {
         content
             .overlay {
                 if displayed.isEmpty {
@@ -93,13 +108,10 @@ struct FileBrowserView: View {
             }
             .disabled(isWorking)
             .searchable(text: $query, prompt: "搜索当前文件夹")
-            .navigationTitle(isRoot ? "网站文件" : directory.lastPathComponent)
-            .toolbar {
-                ToolbarItemGroup(placement: .primaryAction) {
-                    optionsMenu
-                    addMenu
-                }
-            }
+            .navigationTitle(isSelecting ? "已选择 \(selection.count) 项" : (isRoot ? "网站文件" : directory.lastPathComponent))
+            .navigationBarTitleDisplayMode(isSelecting ? .inline : .automatic)
+            .navigationBarBackButtonHidden(isSelecting)
+            .toolbar { toolbarContent }
             .onAppear { reload() }
             .onChange(of: server.filesVersion) { _ in reload() }
             .onChange(of: scenePhase) { phase in
@@ -108,6 +120,10 @@ struct FileBrowserView: View {
             .fileImporter(isPresented: $showImporter, allowedContentTypes: importTypes, allowsMultipleSelection: true) { result in
                 handleImport(result)
             }
+    }
+
+    private func alerts<Content: View>(_ view: Content) -> some View {
+        view
             .alert(nameAction?.title ?? "", isPresented: Binding(
                 get: { nameAction != nil },
                 set: { if !$0 { nameAction = nil } }
@@ -123,19 +139,13 @@ struct FileBrowserView: View {
                 }
             }
             .confirmationDialog(
-                "删除「\(deleteTarget?.name ?? "")」？",
-                isPresented: Binding(get: { deleteTarget != nil }, set: { if !$0 { deleteTarget = nil } }),
+                deleteTitle,
+                isPresented: Binding(get: { !deleteTargets.isEmpty }, set: { if !$0 { deleteTargets = [] } }),
                 titleVisibility: .visible
             ) {
-                Button("删除", role: .destructive) {
-                    if let item = deleteTarget { perform { try FileStore.delete(item) } }
-                }
+                Button("删除", role: .destructive) { deleteConfirmed() }
             } message: {
-                if deleteTarget?.isDirectory == true {
-                    Text("文件夹中的所有内容都会被删除，且无法恢复。")
-                } else {
-                    Text("此操作无法撤销。")
-                }
+                Text(deleteTargets.contains(where: \.isDirectory) ? "文件夹中的所有内容都会被删除，且无法恢复。" : "此操作无法撤销。")
             }
             .alert("放进新文件夹？", isPresented: Binding(
                 get: { pendingImport != nil },
@@ -173,200 +183,92 @@ struct FileBrowserView: View {
             } message: {
                 Text(message ?? "")
             }
+    }
+
+    private func sheets<Content: View>(_ view: Content) -> some View {
+        view
             .sheet(item: $editingItem, onDismiss: reload) { item in
                 TextFileEditor(url: item.url)
             }
+            .sheet(item: $infoItem) { item in
+                FileInfoSheet(item: item)
+            }
+            .sheet(item: $transferRequest) { request in
+                FolderPickerSheet(request: request) { destination in
+                    performTransfer(request, to: destination)
+                }
+            }
     }
 
-    // MARK: - 列表与网格
+    private var deleteTitle: String {
+        deleteTargets.count == 1 ? "删除「\(deleteTargets[0].name)」？" : "删除 \(deleteTargets.count) 个项目？"
+    }
 
-    @ViewBuilder
-    private var content: some View {
-        if gridMode {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 14) {
-                    if isRoot && query.isEmpty {
-                        SitesIntro()
-                    }
-                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 100), spacing: 12)], spacing: 12) {
-                        ForEach(displayed) { item in
-                            tile(for: item)
-                        }
-                    }
-                    summary
-                        .frame(maxWidth: .infinity)
-                }
-                .padding(16)
-            }
-            .background(Color(.systemGroupedBackground))
-            .refreshable { await reload() }
-        } else {
-            List {
-                if isRoot && query.isEmpty {
-                    Section {
-                        SitesIntro()
-                            .listRowInsets(EdgeInsets())
-                            .listRowBackground(Color.clear)
-                    }
-                }
-                Section {
-                    ForEach(displayed) { item in
-                        row(for: item)
-                    }
-                } footer: {
-                    if !displayed.isEmpty {
-                        summary
+    // MARK: - 工具栏
+
+    @ToolbarContentBuilder
+    private var toolbarContent: some ToolbarContent {
+        if isSelecting {
+            ToolbarItem(placement: .navigationBarLeading) {
+                Button(selection.count == displayed.count && !displayed.isEmpty ? "全不选" : "全选") {
+                    if selection.count == displayed.count {
+                        selection.removeAll()
+                    } else {
+                        selection = Set(displayed.map(\.url))
                     }
                 }
             }
-            .listStyle(.insetGrouped)
-            .refreshable { await reload() }
-        }
-    }
-
-    private func row(for item: FileItem) -> some View {
-        let label = FileRowLabel(item: item, siteState: siteState(of: item))
-        return Group {
-            if item.isDirectory {
-                NavigationLink(value: item.url) { label }
-            } else {
-                Button { activate(item) } label: { label }
-                    .foregroundColor(.primary)
+            ToolbarItem(placement: .confirmationAction) {
+                Button("完成") { endSelecting() }
             }
-        }
-        .swipeActions(edge: .trailing) {
-            Button(role: .destructive) {
-                deleteTarget = item
-            } label: {
-                Label("删除", systemImage: "trash")
-            }
-            Button {
-                nameText = item.name
-                nameAction = .rename(item)
-            } label: {
-                Label("重命名", systemImage: "pencil")
-            }
-            .tint(.orange)
-        }
-        .contextMenu { menu(for: item) }
-    }
-
-    private func tile(for item: FileItem) -> some View {
-        let label = FileTile(item: item, siteState: siteState(of: item))
-        return Group {
-            if item.isDirectory {
-                NavigationLink(value: item.url) { label }
-            } else {
-                Button { activate(item) } label: { label }
-            }
-        }
-        .buttonStyle(.plain)
-        .contextMenu { menu(for: item) }
-    }
-
-    @ViewBuilder
-    private func menu(for item: FileItem) -> some View {
-        Button {
-            openInBrowser(item)
-        } label: {
-            Label("在浏览器中打开", systemImage: "safari")
-        }
-        if item.isTextFile {
-            Button {
-                editingItem = item
-            } label: {
-                Label("编辑", systemImage: "square.and.pencil")
-            }
-        }
-        if item.isZip {
-            Button {
-                extract(item)
-            } label: {
-                Label("解压到同名文件夹", systemImage: "archivebox")
-            }
-        }
-        if let state = siteState(of: item) {
-            Button {
-                Haptics.tap()
-                server.setSite(item.name, enabled: state == .disabled)
-            } label: {
-                Label(state == .enabled ? "关闭站点" : "开启站点", systemImage: state == .enabled ? "nosign" : "checkmark.circle")
-            }
-        }
-        if let link = server.webURL(for: item.url) {
-            Button {
-                UIPasteboard.general.string = link.absoluteString
-            } label: {
-                Label("复制链接", systemImage: "link")
-            }
-        }
-        if !item.isDirectory {
-            ShareLink(item: item.url) {
-                Label("分享", systemImage: "square.and.arrow.up")
-            }
-        }
-        Divider()
-        Button {
-            nameText = item.name
-            nameAction = .rename(item)
-        } label: {
-            Label("重命名", systemImage: "pencil")
-        }
-        Button(role: .destructive) {
-            deleteTarget = item
-        } label: {
-            Label("删除", systemImage: "trash")
-        }
-    }
-
-    private var summary: some View {
-        let files = displayed.filter { !$0.isDirectory }
-        let total = files.reduce(Int64(0)) { $0 + $1.size }
-        return Text("\(displayed.count) 项 · 文件共 \(Format.bytes(total))")
-            .font(.footnote)
-            .foregroundColor(.secondary)
-    }
-
-    @ViewBuilder
-    private var emptyState: some View {
-        if !query.isEmpty {
-            VStack(spacing: 8) {
-                Image(systemName: "magnifyingglass")
-                    .font(.system(size: 36))
-                    .foregroundColor(.secondary)
-                Text("没有找到“\(query)”")
-                    .font(.headline)
-            }
-        } else if !isRoot || items.isEmpty {
-            VStack(spacing: 12) {
-                Image(systemName: "tray.and.arrow.down")
-                    .font(.system(size: 44, weight: .light))
-                    .foregroundColor(.secondary)
-                Text("这里还没有文件")
-                    .font(.headline)
-                Text("轻点右上角 + 导入网页文件、文件夹或 zip，\n也可以在电脑浏览器中拖拽上传。")
-                    .font(.subheadline)
-                    .foregroundColor(.secondary)
-                    .multilineTextAlignment(.center)
+            ToolbarItemGroup(placement: .bottomBar) {
                 Button {
-                    importTypes = [.item]
-                    showImporter = true
+                    transferRequest = TransferRequest(urls: selectedItems.map(\.url), copy: false)
                 } label: {
-                    Label("导入文件", systemImage: "plus")
-                        .font(.headline)
-                        .padding(.horizontal, 6)
+                    Label("移动", systemImage: "folder")
                 }
-                .buttonStyle(.borderedProminent)
-                .padding(.top, 4)
+                Spacer()
+                Button {
+                    transferRequest = TransferRequest(urls: selectedItems.map(\.url), copy: true)
+                } label: {
+                    Label("拷贝", systemImage: "doc.on.doc")
+                }
+                Spacer()
+                Button {
+                    compress(selectedItems)
+                } label: {
+                    Label("压缩", systemImage: "archivebox")
+                }
+                Spacer()
+                ShareLink(items: selectedItems.filter { !$0.isDirectory }.map(\.url)) {
+                    Label("分享", systemImage: "square.and.arrow.up")
+                }
+                .disabled(!selectedItems.contains { !$0.isDirectory })
+                Spacer()
+                Button(role: .destructive) {
+                    deleteTargets = selectedItems
+                } label: {
+                    Label("删除", systemImage: "trash")
+                }
             }
-            .padding(32)
+        }
+        if !isSelecting {
+            ToolbarItemGroup(placement: .primaryAction) {
+                optionsMenu
+                addMenu
+            }
         }
     }
-
-    // MARK: - 菜单
 
     private var optionsMenu: some View {
         Menu {
+            Button {
+                isSelecting = true
+                selection.removeAll()
+            } label: {
+                Label("选择", systemImage: "checkmark.circle")
+            }
+            .disabled(displayed.isEmpty)
             Picker("视图", selection: $gridMode) {
                 Label("列表", systemImage: "list.bullet").tag(false)
                 Label("网格", systemImage: "square.grid.2x2").tag(true)
@@ -377,9 +279,9 @@ struct FileBrowserView: View {
                 }
             }
         } label: {
-            Image(systemName: gridMode ? "square.grid.2x2" : "list.bullet")
+            Image(systemName: "ellipsis.circle")
         }
-        .accessibilityLabel("视图与排序")
+        .accessibilityLabel("选择、视图与排序")
     }
 
     private var addMenu: some View {
@@ -401,7 +303,7 @@ struct FileBrowserView: View {
                 nameText = ""
                 nameAction = .newFolder
             } label: {
-                Label("新建文件夹", systemImage: "folder")
+                Label(isRoot ? "新建站点（文件夹）" : "新建文件夹", systemImage: "folder")
             }
             Button {
                 nameText = "index.html"
@@ -410,17 +312,267 @@ struct FileBrowserView: View {
                 Label("新建 HTML 文件", systemImage: "chevron.left.forwardslash.chevron.right")
             }
         } label: {
-            Image(systemName: "plus.circle.fill")
-                .symbolRenderingMode(.hierarchical)
-                .font(.title3)
+            Image(systemName: "plus")
         }
         .accessibilityLabel("添加")
     }
 
-    // MARK: - 操作
+    // MARK: - 列表与网格
+
+    @ViewBuilder
+    private var content: some View {
+        if gridMode && !isSelecting {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 14) {
+                    if isRoot && query.isEmpty {
+                        SitesIntro()
+                    }
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 100), spacing: 12)], spacing: 12) {
+                        ForEach(displayed) { item in
+                            tile(for: item)
+                        }
+                    }
+                    summary
+                        .frame(maxWidth: .infinity)
+                }
+                .padding(16)
+            }
+            .background(Color(.systemGroupedBackground))
+            .refreshable { await reload() }
+        } else {
+            List(selection: $selection) {
+                if isRoot && query.isEmpty && !isSelecting {
+                    Section {
+                        SitesIntro()
+                            .listRowInsets(EdgeInsets())
+                            .listRowBackground(Color.clear)
+                    }
+                }
+                Section {
+                    ForEach(displayed) { item in
+                        row(for: item)
+                    }
+                } footer: {
+                    if !displayed.isEmpty {
+                        summary
+                    }
+                }
+            }
+            .listStyle(.insetGrouped)
+            .environment(\.editMode, .constant(isSelecting ? .active : .inactive))
+            .refreshable { await reload() }
+        }
+    }
+
+    private func row(for item: FileItem) -> some View {
+        let state = siteState(of: item)
+        let label = FileRowLabel(item: item, siteState: state)
+        return Group {
+            if isSelecting {
+                label
+            } else if item.isDirectory {
+                NavigationLink(value: item.url) { label }
+            } else {
+                Button { activate(item) } label: { label }
+                    .foregroundColor(.primary)
+            }
+        }
+        .tag(item.url)
+        .swipeActions(edge: .trailing) {
+            Button(role: .destructive) {
+                deleteTargets = [item]
+            } label: {
+                Label("删除", systemImage: "trash")
+            }
+            Button {
+                transferRequest = TransferRequest(urls: [item.url], copy: false)
+            } label: {
+                Label("移动", systemImage: "folder")
+            }
+            .tint(.indigo)
+        }
+        .swipeActions(edge: .leading) {
+            if let state {
+                Button {
+                    server.setSite(item.name, enabled: state == .disabled)
+                } label: {
+                    Label(state == .enabled ? "关闭站点" : "开启站点", systemImage: state == .enabled ? "nosign" : "checkmark.circle")
+                }
+                .tint(state == .enabled ? .gray : .green)
+            } else {
+                Button {
+                    duplicate(item)
+                } label: {
+                    Label("副本", systemImage: "plus.square.on.square")
+                }
+                .tint(.accentColor)
+            }
+        }
+        .contextMenu { menu(for: item) }
+    }
+
+    private func tile(for item: FileItem) -> some View {
+        let label = FileTile(item: item, siteState: siteState(of: item))
+        return Group {
+            if item.isDirectory {
+                NavigationLink(value: item.url) { label }
+            } else {
+                Button { activate(item) } label: { label }
+            }
+        }
+        .buttonStyle(.plain)
+        .contextMenu { menu(for: item) }
+    }
+
+    @ViewBuilder
+    private func menu(for item: FileItem) -> some View {
+        Section {
+            Button {
+                openInBrowser(item)
+            } label: {
+                Label("在浏览器中打开", systemImage: "safari")
+            }
+            if item.isTextFile {
+                Button {
+                    editingItem = item
+                } label: {
+                    Label("编辑", systemImage: "square.and.pencil")
+                }
+            }
+            Button {
+                infoItem = item
+            } label: {
+                Label("简介", systemImage: "info.circle")
+            }
+        }
+        if let state = siteState(of: item) {
+            Section {
+                Button {
+                    server.setSite(item.name, enabled: state == .disabled)
+                } label: {
+                    Label(state == .enabled ? "关闭站点" : "开启站点", systemImage: state == .enabled ? "nosign" : "checkmark.circle")
+                }
+            }
+        }
+        Section {
+            Button {
+                nameText = item.name
+                nameAction = .rename(item)
+            } label: {
+                Label("重命名", systemImage: "pencil")
+            }
+            Button {
+                duplicate(item)
+            } label: {
+                Label("创建副本", systemImage: "plus.square.on.square")
+            }
+            Button {
+                transferRequest = TransferRequest(urls: [item.url], copy: true)
+            } label: {
+                Label("拷贝到…", systemImage: "doc.on.doc")
+            }
+            Button {
+                transferRequest = TransferRequest(urls: [item.url], copy: false)
+            } label: {
+                Label("移动到…", systemImage: "folder")
+            }
+            if item.isZip {
+                Button {
+                    extract(item)
+                } label: {
+                    Label("解压", systemImage: "archivebox")
+                }
+            } else {
+                Button {
+                    compress([item])
+                } label: {
+                    Label("压缩", systemImage: "archivebox")
+                }
+            }
+        }
+        Section {
+            if let link = server.webURL(for: item.url) {
+                Button {
+                    UIPasteboard.general.string = link.absoluteString
+                    server.showToast("已复制链接", systemName: "link")
+                } label: {
+                    Label("复制链接", systemImage: "link")
+                }
+            }
+            if !item.isDirectory {
+                ShareLink(item: item.url) {
+                    Label("分享", systemImage: "square.and.arrow.up")
+                }
+            }
+        }
+        Button(role: .destructive) {
+            deleteTargets = [item]
+        } label: {
+            Label("删除", systemImage: "trash")
+        }
+    }
+
+    private var summary: some View {
+        let files = displayed.filter { !$0.isDirectory }
+        let total = files.reduce(Int64(0)) { $0 + $1.size }
+        return Text("\(displayed.count) 项 · 文件共 \(Format.bytes(total))")
+            .font(.footnote)
+            .foregroundColor(.secondary)
+    }
+
+    @ViewBuilder
+    private var emptyState: some View {
+        if !query.isEmpty {
+            VStack(spacing: 8) {
+                Image(systemName: "magnifyingglass")
+                    .font(.system(size: 36, weight: .light))
+                    .foregroundColor(.secondary)
+                Text("没有找到“\(query)”")
+                    .font(.headline)
+            }
+        } else if !isRoot || items.isEmpty {
+            VStack(spacing: 12) {
+                Image(systemName: "tray.and.arrow.down")
+                    .font(.system(size: 44, weight: .light))
+                    .foregroundColor(.secondary)
+                Text("这里还没有文件")
+                    .font(.headline)
+                Text("轻点右上角 + 导入网页文件、文件夹或 zip，\n也可以在电脑浏览器中拖拽上传。")
+                    .font(.subheadline)
+                    .foregroundColor(.secondary)
+                    .multilineTextAlignment(.center)
+                Button {
+                    importTypes = [.item]
+                    showImporter = true
+                } label: {
+                    Text("导入文件")
+                        .padding(.horizontal, 6)
+                }
+                .buttonStyle(.borderedProminent)
+                .buttonBorderShape(.capsule)
+                .padding(.top, 4)
+            }
+            .padding(32)
+        }
+    }
+
+    // MARK: - 打开
 
     private func reload() {
         items = FileStore.contents(of: directory)
+        let existing = Set(items.map(\.url))
+        selection = selection.filter { existing.contains($0) }
+    }
+
+    private func endSelecting() {
+        isSelecting = false
+        selection.removeAll()
+    }
+
+    /// 根目录下的文件夹是站点，返回它的开启状态；其他项目返回 nil
+    private func siteState(of item: FileItem) -> SiteState? {
+        guard isRoot, item.isDirectory, Router.isValidSiteName(item.name) else { return nil }
+        return server.isSiteEnabled(item.name) ? .enabled : .disabled
     }
 
     /// 轻点文件：网页、图片、视频等在浏览器中打开；纯文本文件进入编辑器
@@ -431,12 +583,6 @@ struct FileBrowserView: View {
         } else {
             openInBrowser(item)
         }
-    }
-
-    /// 根目录下的文件夹是站点，返回它的开启状态；其他项目返回 nil
-    private func siteState(of item: FileItem) -> SiteState? {
-        guard isRoot, item.isDirectory, Router.isValidSiteName(item.name) else { return nil }
-        return server.isSiteEnabled(item.name) ? .enabled : .disabled
     }
 
     private func openInBrowser(_ item: FileItem) {
@@ -453,6 +599,8 @@ struct FileBrowserView: View {
         }
         server.openInBrowser(url)
     }
+
+    // MARK: - 导入
 
     private func handleImport(_ result: Result<[URL], Error>) {
         switch result {
@@ -484,6 +632,19 @@ struct FileBrowserView: View {
         }
     }
 
+    // MARK: - 文件操作
+
+    private func duplicate(_ item: FileItem) {
+        do {
+            let url = try FileStore.duplicate(item)
+            server.showToast("已创建「\(url.lastPathComponent)」", systemName: "plus.square.on.square")
+        } catch {
+            message = error.localizedDescription
+        }
+        reload()
+        server.notifyFilesChanged()
+    }
+
     private func extract(_ item: FileItem) {
         runInBackground {
             do {
@@ -499,14 +660,79 @@ struct FileBrowserView: View {
         }
     }
 
-    /// 在后台线程执行耗时的文件操作（导入、解压），完成后刷新列表并显示结果
-    private func runInBackground(_ work: @escaping @Sendable () -> String?) {
+    private func compress(_ targets: [FileItem]) {
+        guard !targets.isEmpty else { return }
+        let urls = targets.map(\.url)
+        let directory = directory
+        endSelecting()
+        runInBackground(toast: true) {
+            do {
+                let zip = try FileStore.compress(urls, into: directory)
+                return "已压缩为「\(zip.lastPathComponent)」"
+            } catch {
+                return "压缩失败：\(error.localizedDescription)"
+            }
+        }
+    }
+
+    /// 移动或拷贝到选中的文件夹；同名项目保留两者（自动改名），与「文件」App 一致
+    private func performTransfer(_ request: TransferRequest, to destination: URL) {
+        let urls = request.urls
+        let copy = request.copy
+        endSelecting()
+        runInBackground(toast: true) {
+            var done = 0
+            var failures: [String] = []
+            for url in urls {
+                do {
+                    try FileStore.transfer(url, into: destination, copy: copy, policy: .keepBoth)
+                    done += 1
+                } catch {
+                    failures.append("\(url.lastPathComponent)：\(error.localizedDescription)")
+                }
+            }
+            let target = FileStore.relativePath(of: destination).map { $0.isEmpty ? "www" : $0 } ?? destination.lastPathComponent
+            var text = "已\(copy ? "拷贝" : "移动") \(done) 项到「\(target)」"
+            if !failures.isEmpty {
+                text += "\n" + failures.joined(separator: "\n")
+            }
+            return text
+        }
+    }
+
+    private func deleteConfirmed() {
+        let targets = deleteTargets
+        deleteTargets = []
+        var failures: [String] = []
+        for item in targets {
+            do {
+                try FileStore.delete(item)
+            } catch {
+                failures.append("\(item.name)：\(error.localizedDescription)")
+            }
+        }
+        endSelecting()
+        reload()
+        server.notifyFilesChanged()
+        if failures.isEmpty {
+            server.showToast("已删除 \(targets.count) 项", systemName: "trash")
+        } else {
+            message = failures.joined(separator: "\n")
+        }
+    }
+
+    /// 在后台线程执行耗时的文件操作，完成后刷新列表；toast 为 true 时用轻提示显示结果
+    private func runInBackground(toast: Bool = false, _ work: @escaping @Sendable () -> String?) {
         isWorking = true
         Task {
             let result = await Task.detached(operation: work).value
             isWorking = false
             if let result {
-                message = result
+                if toast && !result.contains("\n") && !result.contains("失败") {
+                    server.showToast(result, systemName: "checkmark.circle")
+                } else {
+                    message = result
+                }
             }
             reload()
             server.notifyFilesChanged()
@@ -550,6 +776,13 @@ enum SiteState {
     case disabled
 }
 
+/// 移动或拷贝请求
+struct TransferRequest: Identifiable {
+    let id = UUID()
+    let urls: [URL]
+    let copy: Bool
+}
+
 /// 根目录顶部的说明
 private struct SitesIntro: View {
     @EnvironmentObject private var server: ServerManager
@@ -558,7 +791,7 @@ private struct SitesIntro: View {
         VStack(alignment: .leading, spacing: 10) {
             Text("每个文件夹都是一个站点")
                 .font(.headline)
-            Text("通过 /文件夹名/ 访问，并以自己为根目录。长按文件夹可以开启或关闭站点。")
+            Text("通过 /文件夹名/ 访问，并以自己为根目录。向右轻扫文件夹可以快速开启或关闭站点。")
                 .font(.subheadline)
                 .foregroundColor(.secondary)
             Button {

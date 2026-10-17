@@ -68,7 +68,18 @@ final class ServerManager: ObservableObject {
     private var backgroundTask: UIBackgroundTaskIdentifier = .invalid
 
     init() {
-        let settings = ServerSettings.load()
+        var settings = ServerSettings.load()
+        // 3.0 把关闭的站点记在设置里，改名后会丢失；迁移为站点文件夹内的标记文件
+        if !settings.disabledSites.isEmpty {
+            for name in settings.disabledSites where Router.isValidSiteName(name) {
+                let folder = FileStore.rootURL.appendingPathComponent(name, isDirectory: true)
+                if FileManager.default.fileExists(atPath: folder.path) {
+                    try? SiteMarker.setEnabled(false, for: folder)
+                }
+            }
+            settings.disabledSites = []
+            settings.save()
+        }
         self.settings = settings
         server = HTTPServer(
             rootURL: FileStore.rootURL,
@@ -160,15 +171,24 @@ final class ServerManager: ObservableObject {
     }
 
     func isSiteEnabled(_ name: String) -> Bool {
-        settings.isSiteEnabled(name)
+        if let site = sites.first(where: { $0.name == name }) {
+            return site.enabled
+        }
+        return !SiteMarker.isDisabled(FileStore.rootURL.appendingPathComponent(name, isDirectory: true))
     }
 
+    /// 开启或关闭站点；状态保存在站点文件夹内，重命名、移动后依然有效
     func setSite(_ name: String, enabled: Bool) {
-        if enabled {
-            settings.disabledSites.removeAll { $0 == name }
-        } else if !settings.disabledSites.contains(name) {
-            settings.disabledSites.append(name)
+        let folder = FileStore.rootURL.appendingPathComponent(name, isDirectory: true)
+        do {
+            try SiteMarker.setEnabled(enabled, for: folder)
+        } catch {
+            showToast("操作失败：\(error.localizedDescription)", systemName: "exclamationmark.triangle")
+            return
         }
+        Haptics.tap()
+        refreshSites()
+        filesVersion += 1
         showToast(enabled ? "已开启「\(name)」" : "已关闭「\(name)」，无法再访问", systemName: enabled ? "checkmark.circle" : "nosign")
     }
 

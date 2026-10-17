@@ -47,6 +47,16 @@ final class HTTPParsingTests: XCTestCase {
         XCTAssertEqual(parsed.query["flag"], "")
     }
 
+    func testQueryUsesFormDecoding() throws {
+        // 浏览器的 URLSearchParams 把空格编码为 +，把 + 编码为 %2B
+        let parsed = try request("GET /api?path=%2Fmy+site%2Fa%2Bb.txt&name=%E4%B8%AD+%E6%96%87 HTTP/1.1")
+        XCTAssertEqual(parsed.query["path"], "/my site/a+b.txt")
+        XCTAssertEqual(parsed.query["name"], "中 文")
+        // 路径部分不做 + 的转换
+        let plusPath = try request("GET /a+b.html HTTP/1.1")
+        XCTAssertEqual(plusPath.path, "/a+b.html")
+    }
+
     func testAbsoluteFormTarget() throws {
         let parsed = try request("GET http://host:8080/a/b?x=1 HTTP/1.1")
         XCTAssertEqual(parsed.path, "/a/b")

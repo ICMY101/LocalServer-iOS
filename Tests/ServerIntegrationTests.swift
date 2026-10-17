@@ -245,7 +245,7 @@ final class ServerIntegrationTests: XCTestCase {
     }
 
     func testDisabledSiteIsInaccessible() async throws {
-        try await startServer(Router.Config(liveReload: false, disabledSites: ["site2"]))
+        try SiteMarker.setEnabled(false, for: site.url.appendingPathComponent("site2"))
         let (body, response) = try await send("/site2/")
         XCTAssertEqual(response.statusCode, 403)
         XCTAssertTrue(text(body).contains("站点未开启"))
@@ -513,5 +513,94 @@ final class ServerIntegrationTests: XCTestCase {
         // 锁定期间即使配对码正确也会被拒绝
         let (_, locked) = try await send("/__admin/api/pair", method: "POST", headers: guardHeader, body: Data(pairing.currentPIN().pin.utf8))
         XCTAssertEqual(locked.statusCode, 429)
+    }
+
+    // MARK: - 网页管理的文件操作
+
+    func testAdminRenameWithSpacesAndPlus() async throws {
+        // 与浏览器 URLSearchParams 的编码方式一致：空格编码为 +，加号编码为 %2B
+        try site.write("a b+c.txt", "x")
+        let (_, response) = try await send("/__admin/api/move?from=%2Fa+b%2Bc.txt&to=%2Fx+y%2Bz.txt", method: "POST", headers: guardHeader)
+        XCTAssertEqual(response.statusCode, 200)
+        XCTAssertEqual(site.read("x y+z.txt"), "x")
+        XCTAssertFalse(site.exists("a b+c.txt"))
+
+        // 带空格的文件夹也能正常列出
+        try site.write("my site/index.html", "m")
+        let (list, listed) = try await send("/__admin/api/list?path=%2Fmy+site")
+        XCTAssertEqual(listed.statusCode, 200)
+        XCTAssertTrue(text(list).contains("index.html"))
+    }
+
+    func testAdminCopyAndMoveWithConflicts() async throws {
+        let (_, copied) = try await send("/__admin/api/copy?from=/data.txt&to=/docs/data.txt", method: "POST", headers: guardHeader)
+        XCTAssertEqual(copied.statusCode, 200)
+        XCTAssertEqual(site.read("docs/data.txt"), "0123456789")
+        XCTAssertTrue(site.exists("data.txt"))
+
+        let (conflictBody, conflict) = try await send("/__admin/api/copy?from=/data.txt&to=/docs/data.txt", method: "POST", headers: guardHeader)
+        XCTAssertEqual(conflict.statusCode, 409)
+        XCTAssertTrue(text(conflictBody).contains("\"conflict\":true"))
+
+        let (keptBody, kept) = try await send("/__admin/api/copy?from=/data.txt&to=/docs/data.txt&conflict=keep", method: "POST", headers: guardHeader)
+        XCTAssertEqual(kept.statusCode, 200)
+        XCTAssertTrue(text(keptBody).contains("data 2.txt"))
+
+        try site.write("data.txt", "changed")
+        let (_, overwritten) = try await send("/__admin/api/move?from=/data.txt&to=/docs/data.txt&conflict=overwrite", method: "POST", headers: guardHeader)
+        XCTAssertEqual(overwritten.statusCode, 200)
+        XCTAssertEqual(site.read("docs/data.txt"), "changed")
+        XCTAssertFalse(site.exists("data.txt"))
+
+        let (duplicateBody, _) = try await send("/__admin/api/copy?from=/docs/readme.txt&to=/docs/readme.txt&conflict=keep", method: "POST", headers: guardHeader)
+        XCTAssertTrue(text(duplicateBody).contains("readme 副本.txt"))
+
+        let (_, intoItself) = try await send("/__admin/api/move?from=/docs&to=/docs/inner/docs", method: "POST", headers: guardHeader)
+        XCTAssertEqual(intoItself.statusCode, 400)
+        XCTAssertTrue(site.exists("docs/readme.txt"))
+    }
+
+    func testAdminSiteToggleSurvivesRename() async throws {
+        let (_, off) = try await send("/__admin/api/site?name=site2&enabled=0", method: "POST", headers: guardHeader)
+        XCTAssertEqual(off.statusCode, 200)
+        let (_, blocked) = try await send("/site2/")
+        XCTAssertEqual(blocked.statusCode, 403)
+
+        // 重命名后仍然是关闭状态
+        let (_, renamed) = try await send("/__admin/api/move?from=/site2&to=/site+three", method: "POST", headers: guardHeader)
+        XCTAssertEqual(renamed.statusCode, 200)
+        let (_, stillBlocked) = try await send("/site%20three/")
+        XCTAssertEqual(stillBlocked.statusCode, 403)
+        let (listBody, _) = try await send("/__admin/api/list?path=/")
+        XCTAssertTrue(text(listBody).contains("\"disabledSites\":[\"site three\"]"))
+
+        let (_, on) = try await send("/__admin/api/site?name=site+three&enabled=1", method: "POST", headers: guardHeader)
+        XCTAssertEqual(on.statusCode, 200)
+        let (page, open) = try await send("/site%20three/")
+        XCTAssertEqual(open.statusCode, 200)
+        XCTAssertEqual(text(page), "<p>site2</p>")
+
+        let (_, invalid) = try await send("/__admin/api/site?name=missing&enabled=0", method: "POST", headers: guardHeader)
+        XCTAssertEqual(invalid.statusCode, 404)
+    }
+
+    func testAdminZipDownload() async throws {
+        let paths = #"["/docs","/data.txt"]"#.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? ""
+        let (body, response) = try await send("/__admin/api/zip?paths=" + paths)
+        XCTAssertEqual(response.statusCode, 200)
+        XCTAssertEqual(response.value(forHTTPHeaderField: "Content-Type"), "application/zip")
+        XCTAssertTrue(response.value(forHTTPHeaderField: "Content-Disposition")?.contains("attachment") == true)
+        XCTAssertEqual(Array(body.prefix(2)), Array("PK".utf8), "应返回 zip 文件")
+
+        // 下载的 zip 解压后内容正确
+        let zip = site.url.appendingPathComponent("downloaded.zip")
+        try body.write(to: zip)
+        let out = site.url.appendingPathComponent("unzipped")
+        _ = try ZipExtractor.extract(zip, into: out)
+        XCTAssertEqual(site.read("unzipped/docs/readme.txt"), "docs")
+        XCTAssertEqual(site.read("unzipped/data.txt"), "0123456789")
+
+        let (_, missing) = try await send("/__admin/api/zip?paths=" + (#"["/nope"]"#.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? ""))
+        XCTAssertEqual(missing.statusCode, 404)
     }
 }

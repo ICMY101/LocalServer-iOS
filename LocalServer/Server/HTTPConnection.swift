@@ -223,9 +223,15 @@ final class HTTPConnection {
                 // 处理器可能已经把临时文件移走了，这里失败无妨
                 try? FileManager.default.removeItem(at: url)
             }
-            guard let self else { return }
+            guard let self else {
+                if let url = response.cleanupURL { try? FileManager.default.removeItem(at: url) }
+                return
+            }
             self.queue.async {
-                guard !self.closed else { return }
+                guard !self.closed else {
+                    if let url = response.cleanupURL { try? FileManager.default.removeItem(at: url) }
+                    return
+                }
                 self.onResponse(request, response)
                 let keepAlive = head.wantsKeepAlive && !self.peerClosed
                 self.send(response, isHead: head.method == "HEAD", keepAlive: keepAlive)
@@ -261,7 +267,11 @@ final class HTTPConnection {
         }
 
         let head = response.serializedHead()
+        let cleanupURL = response.cleanupURL
         let finish: (Bool) -> Void = { [weak self] success in
+            if let cleanupURL {
+                try? FileManager.default.removeItem(at: cleanupURL)
+            }
             self?.finishResponse(success: success, keepAlive: keepAlive)
         }
 

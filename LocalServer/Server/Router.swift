@@ -14,8 +14,6 @@ final class Router {
         var liveReload = true
         /// 电脑端管理页是否需要先用配对码配对
         var requirePairing = true
-        /// 已关闭的站点，关闭后无法访问
-        var disabledSites: Set<String> = []
     }
 
     /// 请求最终交给谁处理
@@ -103,8 +101,8 @@ final class Router {
             return .site(name: context, path: path)
         }
         // 2. 路径以站点名开头：/站点名/...
-        if let first = segments.first, siteURL(first) != nil {
-            if config.disabledSites.contains(first) {
+        if let first = segments.first, let folder = siteURL(first) {
+            if SiteMarker.isDisabled(folder) {
                 return .disabled(name: first)
             }
             var rest = "/" + segments.dropFirst().joined(separator: "/")
@@ -127,7 +125,7 @@ final class Router {
     /// 请求来自哪个站点：优先看来源页（Referer），其次看最近访问的站点（Cookie）
     private func contextSite(of request: HTTPRequest, config: Config) -> String? {
         func enabledSite(_ name: String?) -> String? {
-            guard let name, !config.disabledSites.contains(name), siteURL(name) != nil else { return nil }
+            guard let name, let folder = siteURL(name), !SiteMarker.isDisabled(folder) else { return nil }
             return name
         }
         if let referer = request.header("referer"),
@@ -177,7 +175,7 @@ final class Router {
 
         if isAdmin {
             finish(config.webAdmin
-                ? admin.handle(request, requirePairing: config.requirePairing, disabledSites: config.disabledSites)
+                ? admin.handle(request, requirePairing: config.requirePairing)
                 : .error(404))
             return
         }
@@ -245,7 +243,7 @@ final class Router {
         .filter { url in
             let values = try? url.resourceValues(forKeys: Set(keys))
             let name = url.lastPathComponent
-            return values?.isDirectory == true && Self.isValidSiteName(name) && !config.disabledSites.contains(name)
+            return values?.isDirectory == true && Self.isValidSiteName(name) && !SiteMarker.isDisabled(url)
         }
         .sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
 
