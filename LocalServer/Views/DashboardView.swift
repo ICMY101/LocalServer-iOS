@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// “服务”主页：运行状态、访问统计、访问地址、电脑管理和最近活动
+/// “服务”主页：运行状态、访问统计、站点、访问地址、电脑管理和最近活动
 struct DashboardView: View {
     @EnvironmentObject private var server: ServerManager
     @State private var qrTarget: QRTarget?
@@ -8,139 +8,113 @@ struct DashboardView: View {
     var body: some View {
         NavigationStack {
             ScrollView {
-                VStack(spacing: 14) {
-                    HeroCard()
+                VStack(alignment: .leading, spacing: 30) {
+                    StatusSection()
                     StatsRow(store: server.logStore)
+                    SitesSection(store: server.logStore, qrTarget: $qrTarget)
                     if server.isRunning {
-                        addresses
-                        ComputerCard(qrTarget: $qrTarget)
+                        AddressesSection(qrTarget: $qrTarget)
+                        ComputerSection(qrTarget: $qrTarget)
                     }
-                    ActivityCard(store: server.logStore)
+                    ActivitySection(store: server.logStore)
                 }
-                .padding(.horizontal, 16)
-                .padding(.bottom, 24)
-                .animation(.spring(response: 0.4, dampingFraction: 0.85), value: server.isRunning)
+                .padding(.horizontal, 20)
+                .padding(.top, 4)
+                .padding(.bottom, 36)
+                .animation(.easeInOut(duration: 0.25), value: server.isRunning)
             }
             .background(Color(.systemGroupedBackground))
             .navigationTitle("本地服务器")
-            .refreshable { await server.refreshAddresses() }
+            .refreshable {
+                await server.refreshAddresses()
+                await server.refreshSites()
+            }
         }
         .sheet(item: $qrTarget) { target in
             QRCodeSheet(target: target)
         }
     }
-
-    // MARK: - 访问地址
-
-    private var addresses: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            SectionTitle("访问地址")
-            VStack(spacing: 0) {
-                AddressRow(icon: "iphone", color: .gray, title: "本机", url: server.localURL, onOpen: launch, onQR: nil)
-                if server.settings.allowLAN {
-                    ForEach(server.lanAddresses) { address in
-                        Divider().padding(.leading, 60)
-                        AddressRow(
-                            icon: address.interface.hasPrefix("bridge") ? "personalhotspot" : "wifi",
-                            color: address.interface.hasPrefix("bridge") ? .green : Theme.brandBlue,
-                            title: address.label,
-                            url: server.lanURL(for: address),
-                            onOpen: launch,
-                            onQR: { qrTarget = QRTarget(url: $0, title: "扫码访问网站") }
-                        )
-                    }
-                    if let url = server.bonjourURL {
-                        Divider().padding(.leading, 60)
-                        AddressRow(
-                            icon: "dot.radiowaves.left.and.right",
-                            color: .purple,
-                            title: "固定地址 · IP 变化后仍可用",
-                            url: url,
-                            onOpen: launch,
-                            onQR: { qrTarget = QRTarget(url: $0, title: "扫码访问网站") }
-                        )
-                    }
-                }
-            }
-            .card(padding: 4)
-
-            if server.settings.allowLAN && server.lanAddresses.isEmpty {
-                Label("未连接 Wi-Fi。连接 Wi-Fi 或打开个人热点后，其他设备即可访问。", systemImage: "wifi.exclamationmark")
-                    .font(.footnote)
-                    .foregroundColor(.secondary)
-                    .padding(.horizontal, 4)
-            }
-        }
-    }
-
-    private func launch(_ url: URL) {
-        server.openInBrowser(url)
-    }
 }
 
-// MARK: - 状态卡片
+// MARK: - 运行状态
 
-private struct HeroCard: View {
+private struct StatusSection: View {
     @EnvironmentObject private var server: ServerManager
 
-    private var isFailed: Bool {
-        if case .failed = server.state { return true }
-        return false
-    }
-
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            HStack(alignment: .top, spacing: 12) {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text(title)
-                        .font(.title2.weight(.bold))
-                    detail
-                        .font(.subheadline)
-                        .opacity(0.88)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                Spacer(minLength: 8)
-                PowerButton(isOn: server.isRunning || server.isBusy, isBusy: server.isBusy) {
-                    Haptics.tap()
-                    server.toggle()
-                }
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 7) {
+                StatusDot(color: dotColor)
+                Text(label)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundColor(.secondary)
             }
+            Text(headline)
+                .font(.system(size: 34, weight: .bold))
+                .fixedSize(horizontal: false, vertical: true)
+            detail
+                .font(.body)
+                .foregroundColor(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
 
-            HStack(spacing: 8) {
-                InfoPill(systemName: "folder.fill", text: server.siteRootDisplay)
-                InfoPill(systemName: "number", text: "端口 \(String(server.port))")
-                if server.settings.backgroundAudio {
-                    InfoPill(systemName: "bolt.fill", text: "后台保活")
-                }
-            }
+            HStack(spacing: 10) {
+                if server.isRunning {
+                    Button {
+                        server.openInBrowser(server.localURL)
+                    } label: {
+                        Text("打开站点列表")
+                            .padding(.horizontal, 4)
+                    }
+                    .buttonStyle(.borderedProminent)
 
-            if server.isRunning {
-                Button {
-                    server.openInBrowser(server.localURL)
-                } label: {
-                    Label("在浏览器中打开网站", systemImage: "safari.fill")
-                        .font(.headline)
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 13)
-                        .foregroundColor(Theme.brandBlue)
-                        .background(Color.white, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                    Button("停止") {
+                        Haptics.tap()
+                        server.stop()
+                    }
+                    .buttonStyle(.bordered)
+                } else {
+                    Button {
+                        Haptics.tap()
+                        server.start()
+                    } label: {
+                        Text(server.isBusy ? "正在启动…" : "启动服务")
+                            .padding(.horizontal, 4)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(server.isBusy)
                 }
-                .buttonStyle(.plain)
             }
+            .buttonBorderShape(.capsule)
+            .controlSize(.large)
+            .padding(.top, 8)
         }
-        .foregroundColor(.white)
-        .padding(20)
-        .background(gradient, in: RoundedRectangle(cornerRadius: 26, style: .continuous))
-        .shadow(color: shadowColor.opacity(0.3), radius: 16, y: 8)
-        .padding(.top, 4)
+        .padding(.top, 8)
     }
 
-    private var title: String {
+    private var label: String {
         switch server.state {
-        case .running: return "正在运行"
-        case .starting: return "正在启动…"
-        case .failed: return "启动失败"
+        case .running: return "运行中"
+        case .starting: return "正在启动"
+        case .failed: return "出现问题"
         case .stopped: return "已停止"
+        }
+    }
+
+    private var dotColor: Color {
+        switch server.state {
+        case .running: return .green
+        case .starting: return .orange
+        case .failed: return .red
+        case .stopped: return Color(.tertiaryLabel)
+        }
+    }
+
+    private var headline: String {
+        switch server.state {
+        case .running: return "服务已就绪。"
+        case .starting: return "正在启动服务。"
+        case .failed: return "服务启动失败。"
+        case .stopped: return "服务已停止。"
         }
     }
 
@@ -150,78 +124,31 @@ private struct HeroCard: View {
         case .running:
             if let since = server.runningSince {
                 TimelineView(.periodic(from: since, by: 30)) { context in
-                    Text("已运行 \(Format.duration(context.date.timeIntervalSince(since)))")
+                    Text(runningDetail(uptime: context.date.timeIntervalSince(since)))
                 }
             } else {
-                Text("服务已就绪")
+                Text(runningDetail(uptime: nil))
             }
         case .failed(let message):
             Text(message)
         case .starting:
-            Text("正在监听端口…")
+            Text("正在监听端口 \(String(server.port))。")
         case .stopped:
-            Text("轻点右侧按钮启动服务")
+            Text("启动后，本机和同一 Wi-Fi 下的设备都可以访问你的站点。")
         }
     }
 
-    private var gradient: LinearGradient {
-        switch server.state {
-        case .running, .starting: return Theme.runningGradient
-        case .failed: return Theme.failedGradient
-        case .stopped: return Theme.stoppedGradient
+    private func runningDetail(uptime: TimeInterval?) -> String {
+        var parts = ["端口 \(String(server.port))"]
+        if let uptime {
+            parts.append("已运行 \(Format.duration(uptime))")
         }
-    }
-
-    private var shadowColor: Color {
-        switch server.state {
-        case .running, .starting: return .teal
-        case .failed: return .red
-        case .stopped: return .black
+        let enabled = server.sites.filter { server.isSiteEnabled($0.name) }.count
+        parts.append("\(enabled) 个站点")
+        if server.settings.backgroundAudio {
+            parts.append("后台保活")
         }
-    }
-}
-
-/// 带呼吸光环的电源按钮
-private struct PowerButton: View {
-    let isOn: Bool
-    let isBusy: Bool
-    let action: () -> Void
-
-    @State private var pulse = false
-
-    var body: some View {
-        Button(action: action) {
-            ZStack {
-                if isOn {
-                    Circle()
-                        .stroke(Color.white.opacity(0.5), lineWidth: 2)
-                        .scaleEffect(pulse ? 1.5 : 1)
-                        .opacity(pulse ? 0 : 0.9)
-                }
-                Circle().fill(Color.white.opacity(isOn ? 0.24 : 0.14))
-                Circle().strokeBorder(Color.white.opacity(0.55), lineWidth: 1.5)
-                if isBusy {
-                    ProgressView().tint(.white)
-                } else {
-                    Image(systemName: "power")
-                        .font(.system(size: 28, weight: .bold))
-                }
-            }
-            .frame(width: 74, height: 74)
-            .contentShape(Circle())
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel(isOn ? "停止服务" : "启动服务")
-        .onAppear { updatePulse() }
-        .onChange(of: isOn) { _ in updatePulse() }
-    }
-
-    private func updatePulse() {
-        pulse = false
-        guard isOn else { return }
-        withAnimation(.easeOut(duration: 1.8).repeatForever(autoreverses: false)) {
-            pulse = true
-        }
+        return parts.joined(separator: " · ")
     }
 }
 
@@ -231,96 +158,276 @@ private struct StatsRow: View {
     @ObservedObject var store: RequestLogStore
 
     var body: some View {
-        HStack(spacing: 10) {
-            StatTile(value: "\(store.totalRequests)", title: "请求", systemName: "arrow.left.arrow.right", color: Theme.brandBlue)
-            StatTile(value: Format.bytes(Int64(store.totalBytes)), title: "传输", systemName: "arrow.down.circle", color: .green)
-            StatTile(value: "\(store.activeClients)", title: "访问设备", systemName: "person.2.fill", color: .orange)
+        HStack(spacing: 12) {
+            NavigationLink {
+                LogListView(store: store)
+            } label: {
+                StatTile(value: "\(store.totalRequests)", title: "请求")
+            }
+            StatTile(value: Format.bytes(Int64(store.totalBytes)), title: "传输")
+            NavigationLink {
+                DevicesView()
+            } label: {
+                StatTile(value: "\(store.activeClients)", title: "访问设备 ›")
+            }
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+// MARK: - 站点
+
+private struct SitesSection: View {
+    @EnvironmentObject private var server: ServerManager
+    @ObservedObject var store: RequestLogStore
+    @Binding var qrTarget: QRTarget?
+
+    /// 活跃的排在前面，其次是已开启的
+    private var ordered: [FileStore.SiteInfo] {
+        server.sites.sorted { a, b in
+            let aActive = store.isActive(site: a.name)
+            let bActive = store.isActive(site: b.name)
+            if aActive != bActive { return aActive }
+            let aOn = server.isSiteEnabled(a.name)
+            let bOn = server.isSiteEnabled(b.name)
+            if aOn != bOn { return aOn }
+            return a.name.localizedStandardCompare(b.name) == .orderedAscending
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            SectionTitle("站点") {
+                NavigationLink("管理") { SitesView() }
+            }
+            if server.sites.isEmpty {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("还没有站点")
+                        .font(.headline)
+                    Text("在“文件”页导入文件夹或 zip，www 中的每个文件夹都会成为一个独立站点。")
+                        .font(.subheadline)
+                        .foregroundColor(.secondary)
+                }
+                .card()
+            } else {
+                VStack(spacing: 0) {
+                    ForEach(Array(ordered.prefix(6).enumerated()), id: \.element.id) { index, site in
+                        if index > 0 {
+                            Divider().padding(.leading, 18)
+                        }
+                        SiteRow(site: site, store: store, qrTarget: $qrTarget)
+                    }
+                }
+                .card(padding: 0)
+                if server.sites.count > 6 {
+                    NavigationLink("查看全部 \(server.sites.count) 个站点") { SitesView() }
+                        .font(.subheadline)
+                        .padding(.horizontal, 2)
+                }
+            }
         }
     }
 }
 
-// MARK: - 地址行
+private struct SiteRow: View {
+    let site: FileStore.SiteInfo
+    @ObservedObject var store: RequestLogStore
+    @Binding var qrTarget: QRTarget?
+    @EnvironmentObject private var server: ServerManager
+
+    private var enabled: Bool { server.isSiteEnabled(site.name) }
+
+    var body: some View {
+        HStack(spacing: 14) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text(site.name)
+                    .font(.headline)
+                    .lineLimit(1)
+                HStack(spacing: 6) {
+                    Text(site.path)
+                        .font(.system(.footnote, design: .monospaced))
+                        .lineLimit(1)
+                    status
+                }
+                .foregroundColor(.secondary)
+            }
+            Spacer(minLength: 8)
+            if enabled {
+                CircleIconButton(systemName: "arrow.up.right", label: "在浏览器中打开") {
+                    server.openInBrowser(server.siteURL(site))
+                }
+            } else {
+                PillTag(text: "已关闭")
+            }
+        }
+        .padding(.horizontal, 18)
+        .padding(.vertical, 14)
+        .contentShape(Rectangle())
+        .onTapGesture {
+            if enabled {
+                server.openInBrowser(server.siteURL(site))
+            } else {
+                server.showToast("「\(site.name)」已关闭，长按可以开启", systemName: "nosign")
+            }
+        }
+        .contextMenu {
+            if enabled {
+                Button {
+                    server.openInBrowser(server.siteURL(site))
+                } label: {
+                    Label("在浏览器中打开", systemImage: "safari")
+                }
+                Button {
+                    UIPasteboard.general.string = server.shareableSiteURL(site).absoluteString
+                    server.showToast("已复制站点地址", systemName: "doc.on.doc")
+                } label: {
+                    Label("复制地址", systemImage: "doc.on.doc")
+                }
+                Button {
+                    qrTarget = QRTarget(url: server.shareableSiteURL(site), title: site.name)
+                } label: {
+                    Label("二维码", systemImage: "qrcode")
+                }
+            }
+            Button {
+                server.setSite(site.name, enabled: !enabled)
+            } label: {
+                Label(enabled ? "关闭站点" : "开启站点", systemImage: enabled ? "nosign" : "checkmark.circle")
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var status: some View {
+        if !enabled {
+            EmptyView()
+        } else if store.isActive(site: site.name), let activity = store.stats.sites[site.name] {
+            HStack(spacing: 4) {
+                StatusDot(color: .green, size: 6)
+                Text("活跃 · \(Format.relative(activity.lastAccess))")
+                    .font(.footnote)
+            }
+        } else if !site.hasIndex {
+            Text("· 无首页").font(.footnote)
+        }
+    }
+}
+
+// MARK: - 访问地址
+
+private struct AddressesSection: View {
+    @EnvironmentObject private var server: ServerManager
+    @Binding var qrTarget: QRTarget?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            SectionTitle("访问地址")
+            VStack(spacing: 0) {
+                AddressRow(icon: "iphone", title: "本机", url: server.localURL, onQR: nil)
+                if server.settings.allowLAN {
+                    ForEach(server.lanAddresses) { address in
+                        Divider().padding(.leading, 66)
+                        AddressRow(
+                            icon: address.interface.hasPrefix("bridge") ? "personalhotspot" : "wifi",
+                            title: address.label,
+                            url: server.lanURL(for: address),
+                            onQR: { qrTarget = QRTarget(url: $0, title: "扫码访问") }
+                        )
+                    }
+                    if let url = server.bonjourURL {
+                        Divider().padding(.leading, 66)
+                        AddressRow(
+                            icon: "dot.radiowaves.left.and.right",
+                            title: "固定地址",
+                            url: url,
+                            onQR: { qrTarget = QRTarget(url: $0, title: "扫码访问") }
+                        )
+                    }
+                }
+            }
+            .card(padding: 0)
+
+            if server.settings.allowLAN && server.lanAddresses.isEmpty {
+                Text("未连接 Wi-Fi。连接 Wi-Fi 或打开个人热点后，其他设备即可访问。")
+                    .font(.footnote)
+                    .foregroundColor(.secondary)
+                    .padding(.horizontal, 2)
+            }
+        }
+    }
+}
 
 private struct AddressRow: View {
     let icon: String
-    let color: Color
     let title: String
     let url: URL
-    let onOpen: (URL) -> Void
     let onQR: ((URL) -> Void)?
-
-    @State private var copied = false
+    @EnvironmentObject private var server: ServerManager
 
     var body: some View {
         HStack(spacing: 12) {
-            IconBadge(systemName: icon, color: color, size: 36)
+            IconBadge(systemName: icon, size: 36)
             VStack(alignment: .leading, spacing: 2) {
                 Text(title)
-                    .font(.caption)
+                    .font(.footnote)
                     .foregroundColor(.secondary)
                 Text(url.absoluteString)
-                    .font(.system(.subheadline, design: .monospaced).weight(.medium))
+                    .font(.system(.subheadline, design: .monospaced))
                     .lineLimit(1)
                     .minimumScaleFactor(0.65)
                     .textSelection(.enabled)
             }
             Spacer(minLength: 4)
-            CircleIconButton(systemName: copied ? "checkmark" : "doc.on.doc", label: "复制") {
+            CircleIconButton(systemName: "doc.on.doc", label: "复制") {
                 UIPasteboard.general.string = url.absoluteString
-                withAnimation { copied = true }
-                Task {
-                    try? await Task.sleep(nanoseconds: 1_500_000_000)
-                    withAnimation { copied = false }
-                }
+                server.showToast("已复制地址", systemName: "doc.on.doc")
             }
             if let onQR {
                 CircleIconButton(systemName: "qrcode", label: "二维码") { onQR(url) }
             }
-            CircleIconButton(systemName: "safari", prominent: true, label: "在浏览器中打开") { onOpen(url) }
+            CircleIconButton(systemName: "safari", prominent: true, label: "在浏览器中打开") {
+                server.openInBrowser(url)
+            }
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 10)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
     }
 }
 
 // MARK: - 电脑管理
 
-private struct ComputerCard: View {
+private struct ComputerSection: View {
     @EnvironmentObject private var server: ServerManager
     @Binding var qrTarget: QRTarget?
-    @State private var copied = false
 
     private var adminURL: URL? {
-        if let address = server.lanAddresses.first {
-            return server.adminURL(for: address)
-        }
-        return nil
+        server.lanAddresses.first.map { server.adminURL(for: $0) }
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 12) {
             SectionTitle("电脑管理")
-            VStack(alignment: .leading, spacing: 14) {
+            VStack(alignment: .leading, spacing: 16) {
                 if !server.settings.webAdmin {
-                    disabledNotice("网页管理已关闭", detail: "开启后可以在电脑浏览器中上传、下载和整理文件。") {
+                    notice("网页管理已关闭", detail: "开启后可以在电脑浏览器中上传、下载和整理文件。") {
                         server.settings.webAdmin = true
                     }
                 } else if !server.settings.allowLAN {
-                    disabledNotice("局域网访问已关闭", detail: "开启后同一 Wi-Fi 下的电脑才能访问管理页。") {
+                    notice("局域网访问已关闭", detail: "开启后同一 Wi-Fi 下的电脑才能访问管理页。") {
                         server.settings.allowLAN = true
                     }
                 } else if let url = adminURL {
                     adminLink(url)
                     if server.settings.requirePairing {
                         Divider()
-                        pairingBlock
+                        pairing
                     } else {
-                        Label("未开启配对：同一局域网中的任何人都能管理你的文件", systemImage: "exclamationmark.shield.fill")
+                        Label("未开启配对：同一局域网中的任何人都能管理你的文件。", systemImage: "exclamationmark.triangle")
                             .font(.footnote)
                             .foregroundColor(.orange)
                     }
                 } else {
-                    Label("连接 Wi-Fi 后即可在电脑上管理文件", systemImage: "wifi.slash")
+                    Text("连接 Wi-Fi 后，即可在电脑上管理文件。")
                         .font(.subheadline)
                         .foregroundColor(.secondary)
                 }
@@ -331,34 +438,29 @@ private struct ComputerCard: View {
 
     private func adminLink(_ url: URL) -> some View {
         HStack(spacing: 12) {
-            IconBadge(systemName: "desktopcomputer", color: .indigo, size: 36)
             VStack(alignment: .leading, spacing: 2) {
                 Text("在电脑浏览器中打开")
-                    .font(.caption)
+                    .font(.footnote)
                     .foregroundColor(.secondary)
                 Text(url.absoluteString)
-                    .font(.system(.subheadline, design: .monospaced).weight(.medium))
+                    .font(.system(.subheadline, design: .monospaced))
                     .lineLimit(1)
                     .minimumScaleFactor(0.65)
                     .textSelection(.enabled)
             }
             Spacer(minLength: 4)
-            CircleIconButton(systemName: copied ? "checkmark" : "doc.on.doc", label: "复制") {
+            CircleIconButton(systemName: "doc.on.doc", label: "复制") {
                 UIPasteboard.general.string = url.absoluteString
-                withAnimation { copied = true }
-                Task {
-                    try? await Task.sleep(nanoseconds: 1_500_000_000)
-                    withAnimation { copied = false }
-                }
+                server.showToast("已复制管理页地址", systemName: "doc.on.doc")
             }
             CircleIconButton(systemName: "qrcode", label: "二维码") {
-                qrTarget = QRTarget(url: url, title: "扫码打开电脑管理页")
+                qrTarget = QRTarget(url: url, title: "电脑管理页")
             }
         }
     }
 
-    private var pairingBlock: some View {
-        VStack(alignment: .leading, spacing: 12) {
+    private var pairing: some View {
+        VStack(alignment: .leading, spacing: 14) {
             HStack {
                 Text("配对码")
                     .font(.subheadline.weight(.semibold))
@@ -371,25 +473,22 @@ private struct ComputerCard: View {
                     server.regeneratePIN()
                 } label: {
                     Image(systemName: "arrow.clockwise")
-                        .font(.footnote.weight(.bold))
+                        .font(.footnote.weight(.semibold))
                 }
                 .accessibilityLabel("更换配对码")
             }
             PinDigits(pin: server.pairingCode.pin, size: 38)
                 .frame(maxWidth: .infinity)
-            Text("电脑打开上面的地址后，输入这 6 位配对码即可。每个浏览器只需配对一次。")
-                .font(.caption)
-                .foregroundColor(.secondary)
             NavigationLink {
                 PairedDevicesView()
             } label: {
                 HStack {
-                    Label("已配对设备", systemImage: "laptopcomputer")
+                    Text("已配对设备")
                     Spacer()
                     Text("\(server.pairedDevices.count) 台")
                         .foregroundColor(.secondary)
                     Image(systemName: "chevron.right")
-                        .font(.caption.weight(.bold))
+                        .font(.caption.weight(.semibold))
                         .foregroundColor(Color(.tertiaryLabel))
                 }
                 .font(.subheadline)
@@ -398,72 +497,40 @@ private struct ComputerCard: View {
         }
     }
 
-    private func disabledNotice(_ title: String, detail: String, enable: @escaping () -> Void) -> some View {
+    private func notice(_ title: String, detail: String, enable: @escaping () -> Void) -> some View {
         HStack(spacing: 12) {
-            IconBadge(systemName: "desktopcomputer", color: .gray, size: 36)
-            VStack(alignment: .leading, spacing: 2) {
+            VStack(alignment: .leading, spacing: 3) {
                 Text(title).font(.subheadline.weight(.semibold))
-                Text(detail).font(.caption).foregroundColor(.secondary)
+                Text(detail).font(.footnote).foregroundColor(.secondary)
             }
             Spacer()
             Button("开启", action: enable)
-                .buttonStyle(.borderedProminent)
-                .controlSize(.small)
-        }
-    }
-}
-
-/// 配对码剩余有效时间；到期时回调以取回新的配对码
-struct PinCountdown: View {
-    let expires: Date
-    let onExpire: () -> Void
-
-    var body: some View {
-        TimelineView(.periodic(from: .now, by: 1)) { context in
-            let remaining = max(0, Int(expires.timeIntervalSince(context.date)))
-            Text(remaining > 0 ? String(format: "%d:%02d 后更换", remaining / 60, remaining % 60) : "正在更换…")
-                .font(.caption.monospacedDigit())
-                .foregroundColor(.secondary)
-                .onChange(of: remaining == 0) { expired in
-                    if expired { onExpire() }
-                }
-                .onAppear {
-                    if remaining == 0 { onExpire() }
-                }
+                .buttonStyle(.bordered)
+                .buttonBorderShape(.capsule)
         }
     }
 }
 
 // MARK: - 最近活动
 
-private struct ActivityCard: View {
+private struct ActivitySection: View {
     @ObservedObject var store: RequestLogStore
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 12) {
             SectionTitle("最近活动") {
                 if !store.logs.isEmpty {
-                    NavigationLink {
-                        LogListView(store: store)
-                    } label: {
-                        Text("全部")
-                            .font(.subheadline.weight(.semibold))
-                    }
+                    NavigationLink("全部") { LogListView(store: store) }
                 }
             }
-            VStack(alignment: .leading, spacing: 10) {
+            VStack(alignment: .leading, spacing: 8) {
                 if store.logs.isEmpty {
-                    HStack(spacing: 10) {
-                        Image(systemName: "waveform.path.ecg")
-                            .foregroundColor(.secondary)
-                        Text("还没有访问记录")
-                            .foregroundColor(.secondary)
-                    }
-                    .font(.subheadline)
-                    .frame(maxWidth: .infinity, alignment: .center)
-                    .padding(.vertical, 12)
+                    Text("还没有访问记录。")
+                        .font(.subheadline)
+                        .foregroundColor(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
                 } else {
-                    ForEach(store.logs.prefix(6)) { log in
+                    ForEach(store.logs.prefix(5)) { log in
                         LogRow(log: log)
                     }
                 }

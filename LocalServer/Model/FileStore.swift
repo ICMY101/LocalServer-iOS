@@ -29,17 +29,90 @@ enum FileStore {
 
     /// 网站根目录：Documents/www（在「文件」App 中可见）
     static let rootURL: URL = {
-        let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        let fileManager = FileManager.default
+        let documents = fileManager.urls(for: .documentDirectory, in: .userDomainMask)[0]
         let root = documents.appendingPathComponent("www", isDirectory: true)
-        if !FileManager.default.fileExists(atPath: root.path) {
-            try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-            try? WelcomePage.html.write(to: root.appendingPathComponent("index.html"), atomically: true, encoding: .utf8)
+        if !fileManager.fileExists(atPath: root.path) {
+            try? fileManager.createDirectory(at: root, withIntermediateDirectories: true)
+            try? writeWelcomeSite(in: root)
+        } else {
+            migrateLegacyWelcomePage(in: root)
         }
         return root
     }()
 
+    /// 示例站点所在的文件夹名
+    static let welcomeSiteName = "示例站点"
+
     static func restoreWelcomePage() throws {
-        try WelcomePage.html.write(to: rootURL.appendingPathComponent("index.html"), atomically: true, encoding: .utf8)
+        try writeWelcomeSite(in: rootURL)
+    }
+
+    private static func writeWelcomeSite(in root: URL) throws {
+        let folder = root.appendingPathComponent(welcomeSiteName, isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        try WelcomePage.html.write(to: folder.appendingPathComponent("index.html"), atomically: true, encoding: .utf8)
+    }
+
+    /// 旧版本把示例页放在 www 根目录；现在 / 显示站点列表，把未改动过的旧示例页移进示例站点
+    private static func migrateLegacyWelcomePage(in root: URL) {
+        let legacy = root.appendingPathComponent("index.html")
+        guard let content = try? String(contentsOf: legacy, encoding: .utf8),
+              content.contains(WelcomePage.legacyMarker) else { return }
+        try? FileManager.default.removeItem(at: legacy)
+        let folder = root.appendingPathComponent(welcomeSiteName, isDirectory: true)
+        if !FileManager.default.fileExists(atPath: folder.path) {
+            try? writeWelcomeSite(in: root)
+        }
+    }
+
+    // MARK: - 站点
+
+    struct SiteInfo: Identifiable, Hashable {
+        let name: String
+        let url: URL
+        let hasIndex: Bool
+        let modified: Date?
+
+        var id: String { name }
+        /// 访问路径，例如 `/blog/`
+        var path: String {
+            "/" + (name.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? name) + "/"
+        }
+    }
+
+    /// www 下的每个一级文件夹都是一个站点
+    static func sites() -> [SiteInfo] {
+        contents(of: rootURL)
+            .filter { $0.isDirectory && Router.isValidSiteName($0.name) }
+            .map { item in
+                let fileManager = FileManager.default
+                let hasIndex = fileManager.fileExists(atPath: item.url.appendingPathComponent("index.html").path)
+                    || fileManager.fileExists(atPath: item.url.appendingPathComponent("index.htm").path)
+                return SiteInfo(name: item.name, url: item.url, hasIndex: hasIndex, modified: item.modified)
+            }
+    }
+
+    /// 是否是 www 下的一级文件夹（即一个站点）
+    static func isSiteFolder(_ url: URL) -> Bool {
+        guard let relative = relativePath(of: url), !relative.isEmpty, !relative.contains("/") else { return false }
+        var isDirectory: ObjCBool = false
+        return FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory)
+            && isDirectory.boolValue
+            && Router.isValidSiteName(relative)
+    }
+
+    /// 文件所属的站点名；不在任何站点中时返回 nil
+    static func siteName(of url: URL) -> String? {
+        guard let relative = relativePath(of: url), !relative.isEmpty,
+              let first = relative.split(separator: "/").first.map(String.init),
+              Router.isValidSiteName(first) else { return nil }
+        let folder = rootURL.appendingPathComponent(first)
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: folder.path, isDirectory: &isDirectory), isDirectory.boolValue else {
+            return nil
+        }
+        return first
     }
 
     static func contents(of directory: URL) -> [FileItem] {
@@ -219,9 +292,9 @@ enum FileStore {
         return String(path.dropFirst(basePath.count + 1))
     }
 
-    /// 文件在某个网站根目录下对应的 URL 路径，例如 `/blog/index.html`；不在该网站内时返回 nil
-    static func webPath(for url: URL, siteRoot: URL) -> String? {
-        relativePath(of: url, to: siteRoot).map { "/" + $0 }
+    /// 文件对应的访问路径，例如 `/blog/index.html`；不在 www 内时返回 nil
+    static func webPath(for url: URL) -> String? {
+        relativePath(of: url).map { "/" + $0 }
     }
 
     private static func validated(_ name: String) throws -> String {

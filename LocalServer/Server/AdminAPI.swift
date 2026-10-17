@@ -20,7 +20,7 @@ final class AdminAPI {
         self.pairing = pairing
     }
 
-    func handle(_ request: HTTPRequest, requirePairing: Bool, siteRoot: String) -> HTTPResponse {
+    func handle(_ request: HTTPRequest, requirePairing: Bool, disabledSites: Set<String> = []) -> HTTPResponse {
         let route = String(request.path.dropFirst(Self.prefix.count))
         let token = session(of: request)
         let authorized = !requirePairing || pairing.isPaired(token: token, address: request.remoteAddress)
@@ -54,7 +54,7 @@ final class AdminAPI {
 
         switch (request.method, route) {
         case ("GET", "/api/list"):
-            return list(request, siteRoot: siteRoot, requirePairing: requirePairing)
+            return list(request, disabledSites: disabledSites, requirePairing: requirePairing)
         case ("GET", "/api/download"), ("HEAD", "/api/download"):
             return download(request)
         default:
@@ -164,7 +164,7 @@ final class AdminAPI {
 
     // MARK: - 文件接口
 
-    private func list(_ request: HTTPRequest, siteRoot: String, requirePairing: Bool) -> HTTPResponse {
+    private func list(_ request: HTTPRequest, disabledSites: Set<String>, requirePairing: Bool) -> HTTPResponse {
         guard let directory = target(request.query["path"]) else {
             return failure("路径无效")
         }
@@ -194,7 +194,7 @@ final class AdminAPI {
         }
         let result: [String: Any] = [
             "path": request.query["path"] ?? "/",
-            "siteRoot": siteRoot.isEmpty ? "/" : "/" + siteRoot,
+            "disabledSites": Array(disabledSites),
             "paired": requirePairing,
             "items": items,
         ]

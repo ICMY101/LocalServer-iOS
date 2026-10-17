@@ -24,6 +24,8 @@ struct FileBrowserView: View {
     /// 一次选中多个文件时，等待用户决定是否放进新文件夹
     @State private var pendingImport: [URL]?
     @State private var folderNameText = ""
+    /// 尝试打开已关闭站点中的文件时，提示是否开启
+    @State private var disabledSite: String?
 
     enum SortOrder: String, CaseIterable, Identifiable {
         case name
@@ -153,6 +155,19 @@ struct FileBrowserView: View {
             } message: {
                 Text("选中了 \(pendingImport?.count ?? 0) 个文件，放进同一个文件夹可以避免散落在当前目录。")
             }
+            .alert("站点「\(disabledSite ?? "")」已关闭", isPresented: Binding(
+                get: { disabledSite != nil },
+                set: { if !$0 { disabledSite = nil } }
+            )) {
+                Button("开启站点") {
+                    if let site = disabledSite {
+                        server.setSite(site, enabled: true)
+                    }
+                }
+                Button("取消", role: .cancel) {}
+            } message: {
+                Text("关闭的站点无法访问。开启后再试一次。")
+            }
             .alert("提示", isPresented: Binding(get: { message != nil }, set: { if !$0 { message = nil } })) {
                 Button("好", role: .cancel) {}
             } message: {
@@ -171,7 +186,7 @@ struct FileBrowserView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 14) {
                     if isRoot && query.isEmpty {
-                        SiteBanner()
+                        SitesIntro()
                     }
                     LazyVGrid(columns: [GridItem(.adaptive(minimum: 100), spacing: 12)], spacing: 12) {
                         ForEach(displayed) { item in
@@ -189,7 +204,7 @@ struct FileBrowserView: View {
             List {
                 if isRoot && query.isEmpty {
                     Section {
-                        SiteBanner()
+                        SitesIntro()
                             .listRowInsets(EdgeInsets())
                             .listRowBackground(Color.clear)
                     }
@@ -210,7 +225,7 @@ struct FileBrowserView: View {
     }
 
     private func row(for item: FileItem) -> some View {
-        let label = FileRowLabel(item: item, isSiteRoot: item.isDirectory && server.isSiteRoot(item.url))
+        let label = FileRowLabel(item: item, siteState: siteState(of: item))
         return Group {
             if item.isDirectory {
                 NavigationLink(value: item.url) { label }
@@ -237,7 +252,7 @@ struct FileBrowserView: View {
     }
 
     private func tile(for item: FileItem) -> some View {
-        let label = FileTile(item: item, isSiteRoot: item.isDirectory && server.isSiteRoot(item.url))
+        let label = FileTile(item: item, siteState: siteState(of: item))
         return Group {
             if item.isDirectory {
                 NavigationLink(value: item.url) { label }
@@ -270,20 +285,12 @@ struct FileBrowserView: View {
                 Label("解压到同名文件夹", systemImage: "archivebox")
             }
         }
-        if item.isDirectory {
-            if server.isSiteRoot(item.url) {
-                Button {
-                    server.setSiteRoot(nil)
-                } label: {
-                    Label("恢复以 www 为网站根目录", systemImage: "arrow.uturn.backward")
-                }
-            } else {
-                Button {
-                    Haptics.tap()
-                    server.setSiteRoot(item.url)
-                } label: {
-                    Label("设为网站根目录", systemImage: "globe")
-                }
+        if let state = siteState(of: item) {
+            Button {
+                Haptics.tap()
+                server.setSite(item.name, enabled: state == .disabled)
+            } label: {
+                Label(state == .enabled ? "关闭站点" : "开启站点", systemImage: state == .enabled ? "nosign" : "checkmark.circle")
             }
         }
         if let link = server.webURL(for: item.url) {
@@ -332,7 +339,9 @@ struct FileBrowserView: View {
             }
         } else if !isRoot || items.isEmpty {
             VStack(spacing: 12) {
-                IconBadge(systemName: "tray.and.arrow.down.fill", color: Theme.brandBlue, size: 64)
+                Image(systemName: "tray.and.arrow.down")
+                    .font(.system(size: 44, weight: .light))
+                    .foregroundColor(.secondary)
                 Text("这里还没有文件")
                     .font(.headline)
                 Text("轻点右上角 + 导入网页文件、文件夹或 zip，\n也可以在电脑浏览器中拖拽上传。")
@@ -424,9 +433,19 @@ struct FileBrowserView: View {
         }
     }
 
+    /// 根目录下的文件夹是站点，返回它的开启状态；其他项目返回 nil
+    private func siteState(of item: FileItem) -> SiteState? {
+        guard isRoot, item.isDirectory, Router.isValidSiteName(item.name) else { return nil }
+        return server.isSiteEnabled(item.name) ? .enabled : .disabled
+    }
+
     private func openInBrowser(_ item: FileItem) {
+        if let site = FileStore.siteName(of: item.url), !server.isSiteEnabled(site) {
+            disabledSite = site
+            return
+        }
         guard var url = server.webURL(for: item.url) else {
-            message = "该项目不在当前网站（\(server.siteRootDisplay)）中，无法通过网址访问。可以长按它所在的文件夹，选择“设为网站根目录”。"
+            message = "该项目不在 www 中，无法通过网址访问。"
             return
         }
         if item.isDirectory && !url.absoluteString.hasSuffix("/") {
@@ -526,71 +545,68 @@ struct FileBrowserView: View {
 
 // MARK: - 子视图
 
-/// 根目录顶部的“当前网站”横幅
-private struct SiteBanner: View {
+enum SiteState {
+    case enabled
+    case disabled
+}
+
+/// 根目录顶部的说明
+private struct SitesIntro: View {
     @EnvironmentObject private var server: ServerManager
 
     var body: some View {
-        HStack(spacing: 14) {
-            Image(systemName: "globe")
-                .font(.system(size: 22, weight: .semibold))
-                .frame(width: 46, height: 46)
-                .background(Color.white.opacity(0.2), in: RoundedRectangle(cornerRadius: 13, style: .continuous))
-            VStack(alignment: .leading, spacing: 3) {
-                Text("当前网站")
-                    .font(.caption.weight(.semibold))
-                    .opacity(0.85)
-                Text(server.siteRootDisplay)
-                    .font(.headline)
-                    .lineLimit(1)
-            }
-            Spacer(minLength: 8)
+        VStack(alignment: .leading, spacing: 10) {
+            Text("每个文件夹都是一个站点")
+                .font(.headline)
+            Text("通过 /文件夹名/ 访问，并以自己为根目录。长按文件夹可以开启或关闭站点。")
+                .font(.subheadline)
+                .foregroundColor(.secondary)
             Button {
                 server.openInBrowser(server.localURL)
             } label: {
-                Label("打开", systemImage: "safari.fill")
-                    .font(.subheadline.weight(.bold))
-                    .foregroundColor(Theme.brandBlue)
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 9)
-                    .background(Color.white, in: Capsule())
+                Text("在浏览器中查看所有站点 ›")
+                    .font(.subheadline)
             }
             .buttonStyle(.plain)
+            .foregroundColor(.accentColor)
         }
-        .foregroundColor(.white)
-        .padding(14)
-        .background(Theme.brandGradient, in: RoundedRectangle(cornerRadius: Theme.cardRadius, style: .continuous))
+        .card()
     }
 }
 
 private struct FileRowLabel: View {
     let item: FileItem
-    let isSiteRoot: Bool
+    let siteState: SiteState?
 
     var body: some View {
-        let kind = isSiteRoot ? FileKind(symbol: "globe", color: Theme.brandPurple, label: "网站") : FileKind.of(item)
+        let kind = FileKind.of(item)
         HStack(spacing: 12) {
-            IconBadge(systemName: kind.symbol, color: kind.color, size: 38)
+            IconBadge(systemName: siteState == nil ? kind.symbol : "globe", color: item.isDirectory ? .accentColor : .secondary, size: 38)
             VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: 6) {
                     Text(item.name)
-                        .font(.body.weight(.medium))
+                        .font(.body)
                         .lineLimit(1)
                         .truncationMode(.middle)
-                    if isSiteRoot {
-                        SiteRootTag()
+                    if siteState == .disabled {
+                        PillTag(text: "已关闭")
                     }
                 }
                 Text(subtitle(kind))
-                    .font(.caption)
+                    .font(.footnote)
                     .foregroundColor(.secondary)
             }
         }
         .padding(.vertical, 2)
+        .opacity(siteState == .disabled ? 0.6 : 1)
     }
 
     private func subtitle(_ kind: FileKind) -> String {
         let date = item.modified.map { $0.formatted(date: .abbreviated, time: .shortened) } ?? ""
+        if let siteState {
+            let path = "/" + item.name + "/"
+            return siteState == .enabled ? "站点 · \(path)" : "站点已关闭 · \(path)"
+        }
         if item.isDirectory { return date }
         return "\(kind.label) · \(Format.bytes(item.size)) · \(date)"
     }
@@ -598,50 +614,38 @@ private struct FileRowLabel: View {
 
 private struct FileTile: View {
     let item: FileItem
-    let isSiteRoot: Bool
+    let siteState: SiteState?
 
     var body: some View {
-        let kind = isSiteRoot ? FileKind(symbol: "globe", color: Theme.brandPurple, label: "网站") : FileKind.of(item)
+        let kind = FileKind.of(item)
         VStack(spacing: 8) {
-            ZStack(alignment: .topTrailing) {
-                Image(systemName: kind.symbol)
-                    .font(.system(size: 28, weight: .semibold))
-                    .foregroundColor(.white)
-                    .frame(width: 64, height: 64)
-                    .background(kind.color.gradient, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-                if isSiteRoot {
-                    Image(systemName: "star.fill")
-                        .font(.system(size: 10, weight: .bold))
-                        .foregroundColor(.white)
-                        .padding(5)
-                        .background(Color.orange, in: Circle())
-                        .offset(x: 6, y: -6)
-                }
-            }
+            Image(systemName: siteState == nil ? kind.symbol : "globe")
+                .font(.system(size: 28, weight: .light))
+                .foregroundColor(item.isDirectory ? .accentColor : .secondary)
+                .frame(width: 64, height: 64)
+                .background(Color(.tertiarySystemFill), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
             Text(item.name)
                 .font(.caption.weight(.medium))
                 .lineLimit(2)
                 .multilineTextAlignment(.center)
                 .frame(height: 32, alignment: .top)
-            Text(item.isDirectory ? kind.label : Format.bytes(item.size))
+            Text(caption(kind))
                 .font(.caption2)
                 .foregroundColor(.secondary)
         }
         .frame(maxWidth: .infinity)
         .padding(.vertical, 14)
         .padding(.horizontal, 6)
-        .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-        .contentShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: Theme.cardRadius, style: .continuous))
+        .contentShape(RoundedRectangle(cornerRadius: Theme.cardRadius, style: .continuous))
+        .opacity(siteState == .disabled ? 0.6 : 1)
     }
-}
 
-private struct SiteRootTag: View {
-    var body: some View {
-        Text("网站根目录")
-            .font(.caption2.weight(.bold))
-            .foregroundColor(.white)
-            .padding(.horizontal, 6)
-            .padding(.vertical, 2)
-            .background(Theme.brandGradient, in: Capsule())
+    private func caption(_ kind: FileKind) -> String {
+        switch siteState {
+        case .enabled: return "站点"
+        case .disabled: return "已关闭"
+        case nil: return item.isDirectory ? kind.label : Format.bytes(item.size)
+        }
     }
 }

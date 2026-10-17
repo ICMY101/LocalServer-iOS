@@ -6,18 +6,18 @@ struct PinDigits: View {
     var size: CGFloat = 40
 
     var body: some View {
-        HStack(spacing: size * 0.18) {
+        HStack(spacing: size * 0.16) {
             ForEach(Array(pin.enumerated()), id: \.offset) { index, digit in
                 if index == 3 {
-                    Spacer().frame(width: size * 0.12)
+                    Spacer().frame(width: size * 0.14)
                 }
                 Text(String(digit))
-                    .font(.system(size: size * 0.62, weight: .bold, design: .rounded))
+                    .font(.system(size: size * 0.6, weight: .semibold))
                     .monospacedDigit()
-                    .frame(width: size, height: size * 1.22)
+                    .frame(width: size, height: size * 1.25)
                     .background(
                         Color(.tertiarySystemFill),
-                        in: RoundedRectangle(cornerRadius: size * 0.26, style: .continuous)
+                        in: RoundedRectangle(cornerRadius: size * 0.22, style: .continuous)
                     )
             }
         }
@@ -36,65 +36,54 @@ struct CircleIconButton: View {
     var body: some View {
         Button(action: action) {
             Image(systemName: systemName)
-                .font(.system(size: 15, weight: .semibold))
-                .foregroundColor(prominent ? .white : Theme.brandBlue)
-                .frame(width: 36, height: 36)
-                .background {
-                    if prominent {
-                        Circle().fill(Theme.brandGradient)
-                    } else {
-                        Circle().fill(Theme.brandBlue.opacity(0.12))
-                    }
-                }
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundColor(prominent ? .white : .accentColor)
+                .frame(width: 34, height: 34)
+                .background(prominent ? Color.accentColor : Color(.tertiarySystemFill), in: Circle())
         }
         .buttonStyle(.plain)
         .accessibilityLabel(label)
     }
 }
 
-/// 统计数字卡片
+/// 统计数字
 struct StatTile: View {
     let value: String
     let title: String
-    let systemName: String
-    let color: Color
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Image(systemName: systemName)
-                .font(.system(size: 14, weight: .bold))
-                .foregroundColor(color)
-                .frame(width: 28, height: 28)
-                .background(color.opacity(0.14), in: Circle())
+        VStack(alignment: .leading, spacing: 4) {
             Text(value)
-                .font(.system(.title3, design: .rounded).weight(.bold))
+                .font(.system(size: 26, weight: .semibold))
                 .monospacedDigit()
                 .lineLimit(1)
                 .minimumScaleFactor(0.6)
             Text(title)
-                .font(.caption)
+                .font(.footnote)
                 .foregroundColor(.secondary)
         }
-        .card(padding: 14)
+        .card(padding: 16)
     }
 }
 
-/// 浮在渐变背景上的半透明小标签
-struct InfoPill: View {
-    let systemName: String
-    let text: String
+/// 配对码剩余有效时间；到期时回调以取回新的配对码
+struct PinCountdown: View {
+    let expires: Date
+    let onExpire: () -> Void
 
     var body: some View {
-        HStack(spacing: 5) {
-            Image(systemName: systemName)
-                .font(.system(size: 10, weight: .bold))
-            Text(text)
-                .font(.caption.weight(.semibold))
-                .lineLimit(1)
+        TimelineView(.periodic(from: .now, by: 1)) { context in
+            let remaining = max(0, Int(expires.timeIntervalSince(context.date)))
+            Text(remaining > 0 ? String(format: "%d:%02d 后更换", remaining / 60, remaining % 60) : "正在更换…")
+                .font(.footnote.monospacedDigit())
+                .foregroundColor(.secondary)
+                .onChange(of: remaining == 0) { expired in
+                    if expired { onExpire() }
+                }
+                .onAppear {
+                    if remaining == 0 { onExpire() }
+                }
         }
-        .padding(.horizontal, 9)
-        .padding(.vertical, 5)
-        .background(Color.white.opacity(0.18), in: Capsule())
     }
 }
 
@@ -109,35 +98,32 @@ struct LogRow: View {
     }()
 
     var body: some View {
-        HStack(spacing: 12) {
+        HStack(alignment: .firstTextBaseline, spacing: 12) {
             Text("\(log.status)")
-                .font(.system(size: 12, weight: .bold, design: .rounded))
+                .font(.system(size: 13, weight: .semibold))
                 .monospacedDigit()
                 .foregroundColor(statusColor)
-                .frame(width: 40, height: 26)
-                .background(statusColor.opacity(0.14), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+                .frame(width: 34, alignment: .leading)
             VStack(alignment: .leading, spacing: 3) {
-                HStack(spacing: 6) {
-                    Text(log.method)
-                        .font(.caption2.weight(.heavy))
-                        .foregroundColor(.secondary)
-                    Text(log.path)
-                        .font(.system(.footnote, design: .monospaced))
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                }
+                Text(log.path)
+                    .font(.system(.subheadline, design: .monospaced))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
                 Text(detail)
-                    .font(.caption2)
+                    .font(.caption)
                     .foregroundColor(.secondary)
                     .lineLimit(1)
             }
             Spacer(minLength: 0)
         }
-        .padding(.vertical, 2)
+        .padding(.vertical, 3)
     }
 
     private var detail: String {
-        var parts = [Self.timeFormatter.string(from: log.date), log.client]
+        var parts = [Self.timeFormatter.string(from: log.date), log.method, log.client]
+        if let site = log.site {
+            parts.append(site)
+        }
         if log.bytes > 0 {
             parts.append(Format.bytes(Int64(log.bytes)))
         }
@@ -147,9 +133,24 @@ struct LogRow: View {
     private var statusColor: Color {
         switch log.status {
         case ..<300: return .green
-        case ..<400: return .blue
+        case ..<400: return .secondary
         case ..<500: return .orange
         default: return .red
         }
+    }
+}
+
+/// 屏幕底部的轻提示
+struct ToastView: View {
+    let toast: Toast
+
+    var body: some View {
+        Label(toast.text, systemImage: toast.systemName)
+            .font(.subheadline.weight(.medium))
+            .padding(.horizontal, 18)
+            .padding(.vertical, 12)
+            .background(.regularMaterial, in: Capsule())
+            .shadow(color: .black.opacity(0.12), radius: 12, y: 4)
+            .padding(.horizontal, 24)
     }
 }

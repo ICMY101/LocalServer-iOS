@@ -12,12 +12,11 @@ struct PairingSheet: View {
         VStack(spacing: 22) {
             ZStack {
                 Circle()
-                    .fill(succeeded ? AnyShapeStyle(Color.green.gradient) : AnyShapeStyle(Theme.brandGradient))
-                    .frame(width: 76, height: 76)
-                    .shadow(color: (succeeded ? Color.green : Theme.brandBlue).opacity(0.35), radius: 14, y: 6)
+                    .fill(succeeded ? Color.green : Color(.tertiarySystemFill))
+                    .frame(width: 72, height: 72)
                 Image(systemName: succeeded ? "checkmark" : "laptopcomputer.and.iphone")
-                    .font(.system(size: succeeded ? 34 : 30, weight: .bold))
-                    .foregroundColor(.white)
+                    .font(.system(size: succeeded ? 32 : 28, weight: succeeded ? .bold : .regular))
+                    .foregroundColor(succeeded ? .white : .accentColor)
             }
             .padding(.top, 28)
 
@@ -164,7 +163,7 @@ private struct DeviceRow: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            IconBadge(systemName: icon, color: color, size: 36)
+            IconBadge(systemName: DeviceSymbol.of(device.name), color: .accentColor, size: 36)
             VStack(alignment: .leading, spacing: 3) {
                 Text(device.name)
                     .font(.body.weight(.medium))
@@ -174,20 +173,6 @@ private struct DeviceRow: View {
             }
         }
         .padding(.vertical, 2)
-    }
-
-    private var icon: String {
-        if device.name.hasPrefix("iPhone") || device.name.hasPrefix("Android") { return "iphone" }
-        if device.name.hasPrefix("iPad") { return "ipad" }
-        if device.name.hasPrefix("Mac") { return "laptopcomputer" }
-        return "desktopcomputer"
-    }
-
-    private var color: Color {
-        if device.name.hasPrefix("Windows") { return .blue }
-        if device.name.hasPrefix("Mac") { return .gray }
-        if device.name.hasPrefix("Android") { return .green }
-        return .indigo
     }
 }
 

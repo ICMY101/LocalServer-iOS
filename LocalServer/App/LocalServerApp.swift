@@ -9,7 +9,7 @@ struct LocalServerApp: App {
         WindowGroup {
             ContentView()
                 .environmentObject(server)
-                .tint(Theme.brandBlue)
+                .tint(.accentColor)
         }
         .onChange(of: scenePhase) { phase in
             server.handleScenePhase(phase)
@@ -23,6 +23,14 @@ struct ContentView: View {
 
     var body: some View {
         tabs
+            .overlay(alignment: .bottom) {
+                if let toast = server.toast {
+                    ToastView(toast: toast)
+                        .padding(.bottom, 70)
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                        .id(toast.id)
+                }
+            }
             // 在微信等 App 中选择“用其他应用打开 › 本地服务器”时触发
             .onOpenURL { url in
                 server.receive(url)

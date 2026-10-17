@@ -18,8 +18,10 @@ struct ServerSettings: Codable, Equatable {
     var backgroundAudio = true
     /// 后台保活时，连续多少分钟没有请求就停止保活让系统挂起 App；0 表示一直保活
     var keepAliveIdleMinutes = 15
-    /// 当前网站相对 www 的路径，空字符串表示 www 本身
-    var siteRoot = ""
+    /// 已关闭的站点（www 下的文件夹名），关闭后无法访问
+    var disabledSites: [String] = []
+    /// 已拉黑的访问设备 IP，拉黑后拒绝其所有连接
+    var blockedClients: [String] = []
 
     init() {}
 
@@ -31,15 +33,24 @@ struct ServerSettings: Codable, Equatable {
             cors: cors,
             liveReload: liveReload,
             requirePairing: requirePairing,
-            siteRoot: siteRoot
+            disabledSites: Set(disabledSites)
         )
+    }
+
+    func isSiteEnabled(_ name: String) -> Bool {
+        !disabledSites.contains(name)
+    }
+
+    func isBlocked(_ client: String) -> Bool {
+        blockedClients.contains(client)
     }
 
     // MARK: - 持久化
 
     private enum CodingKeys: String, CodingKey {
         case port, allowLAN, autoStart, bonjour, directoryListing, spaFallback, cors, liveReload
-        case webAdmin, requirePairing, autoExtractZip, keepScreenOn, backgroundAudio, keepAliveIdleMinutes, siteRoot
+        case webAdmin, requirePairing, autoExtractZip, keepScreenOn, backgroundAudio, keepAliveIdleMinutes
+        case disabledSites, blockedClients
     }
 
     /// 逐个字段解码，缺失的字段使用默认值，这样新版本新增设置项时不会丢掉用户原有的设置
@@ -60,7 +71,8 @@ struct ServerSettings: Codable, Equatable {
         keepScreenOn = (try? container.decodeIfPresent(Bool.self, forKey: .keepScreenOn)) ?? defaults.keepScreenOn
         backgroundAudio = (try? container.decodeIfPresent(Bool.self, forKey: .backgroundAudio)) ?? defaults.backgroundAudio
         keepAliveIdleMinutes = (try? container.decodeIfPresent(Int.self, forKey: .keepAliveIdleMinutes)) ?? defaults.keepAliveIdleMinutes
-        siteRoot = (try? container.decodeIfPresent(String.self, forKey: .siteRoot)) ?? defaults.siteRoot
+        disabledSites = (try? container.decodeIfPresent([String].self, forKey: .disabledSites)) ?? defaults.disabledSites
+        blockedClients = (try? container.decodeIfPresent([String].self, forKey: .blockedClients)) ?? defaults.blockedClients
     }
 
     private static let storageKey = "ServerSettings"

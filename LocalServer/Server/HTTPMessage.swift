@@ -119,6 +119,8 @@ struct HTTPResponse {
     var status: Int
     var headers: [(String, String)]
     var body: Body
+    /// 响应所属的站点（仅用于统计，不会发送给浏览器）
+    var site: String?
 
     init(status: Int, headers: [(String, String)] = [], body: Body = .empty) {
         self.status = status
@@ -177,20 +179,31 @@ struct HTTPResponse {
     }
 
     static func error(_ status: Int, _ message: String? = nil, headers: [(String, String)] = []) -> HTTPResponse {
-        let reason = HTTPStatus.reason(for: status)
-        let detail = message.map { "<p>\($0.htmlEscaped)</p>" } ?? ""
-        var response = html("""
-        <!doctype html><html><head><meta charset="utf-8">\
-        <meta name="viewport" content="width=device-width,initial-scale=1">\
-        <title>\(status) \(reason)</title>\
-        <style>body{font-family:-apple-system,system-ui,sans-serif;padding:40px 20px;color:#333;text-align:center}\
-        h1{font-weight:600}p{color:#888}@media(prefers-color-scheme:dark){body{background:#111;color:#eee}}</style>\
-        </head><body><h1>\(status) \(reason)</h1>\(detail)</body></html>
-        """, status: status)
+        let title: String
+        switch status {
+        case 403: title = "无法访问"
+        case 404: title = "找不到页面"
+        case 405: title = "不支持的请求方式"
+        default: title = HTTPStatus.reason(for: status)
+        }
+        var response = page(status: status, title: title, message: message ?? "")
         for (name, value) in headers {
             response.setHeader(name, value)
         }
         return response
+    }
+
+    /// 简洁的说明页面，用于错误、站点未开启等情况
+    static func page(status: Int, title: String, message: String, actionTitle: String = "查看所有站点", actionURL: String = "/") -> HTTPResponse {
+        let body = """
+        <main style="text-align:center;padding-top:18vh">
+        <p class="eyebrow">\(status)</p>
+        <h1>\(title.htmlEscaped)</h1>
+        <p class="lead" style="margin:0 auto 36px">\(message.htmlEscaped)</p>
+        <a class="pill" href="\(actionURL.htmlEscaped)">\(actionTitle.htmlEscaped)</a>
+        </main>
+        """
+        return html(WebStyle.page(title: "\(status) \(title)", body: body), status: status)
     }
 
     static func redirect(to location: String, permanent: Bool = true) -> HTTPResponse {

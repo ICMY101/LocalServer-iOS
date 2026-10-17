@@ -14,6 +14,10 @@ final class ServerIntegrationTests: XCTestCase {
         try site.write("data.txt", "0123456789")
         try site.write("docs/readme.txt", "docs")
         try site.write("site2/index.html", "<p>site2</p>")
+        try site.write("site2/css/app.css", "s2")
+        try site.write("site1/index.html", "<html><head><link rel=stylesheet href=/css/app.css></head><body>site1</body></html>")
+        try site.write("site1/css/app.css", "s1")
+        try site.write("site1/page.html", "<p>page</p>")
         try site.write(".secret", "hidden")
 
         let configuration = URLSessionConfiguration.ephemeral
@@ -91,11 +95,19 @@ final class ServerIntegrationTests: XCTestCase {
 
     // MARK: - 静态文件
 
-    func testServesIndexForRoot() async throws {
+    func testRootShowsAllSites() async throws {
         let (body, response) = try await send("/")
         XCTAssertEqual(response.statusCode, 200)
-        XCTAssertEqual(text(body), "<html><body>Home</body></html>")
         XCTAssertEqual(response.value(forHTTPHeaderField: "Content-Type"), "text/html; charset=utf-8")
+        let page = text(body)
+        XCTAssertTrue(page.contains("href=\"/site1/\""))
+        XCTAssertTrue(page.contains("href=\"/site2/\""))
+        XCTAssertTrue(page.contains("href=\"/docs/\""))
+        XCTAssertFalse(page.contains("Home"), "/ 显示站点列表，而不是根目录的 index.html")
+
+        // 根目录下的散落文件仍然可以直接访问
+        let (file, _) = try await send("/index.html")
+        XCTAssertEqual(text(file), "<html><body>Home</body></html>")
     }
 
     func testKeepAliveServesManyRequests() async throws {
@@ -170,27 +182,123 @@ final class ServerIntegrationTests: XCTestCase {
 
     // MARK: - 网站选项
 
-    func testSPAFallback() async throws {
+    func testSPAFallbackWithinSite() async throws {
         try await startServer(Router.Config(spaFallback: true, liveReload: false))
-        let (body, response) = try await send("/some/client/route", headers: ["Accept": "text/html"])
+        let (body, response) = try await send("/site2/some/client/route", headers: ["Accept": "text/html"])
         XCTAssertEqual(response.statusCode, 200)
-        XCTAssertTrue(text(body).contains("Home"))
-    }
-
-    func testSiteRootSwitching() async throws {
-        try await startServer(Router.Config(liveReload: false, siteRoot: "site2"))
-        let (body, _) = try await send("/")
         XCTAssertEqual(text(body), "<p>site2</p>")
 
-        // 设置的文件夹不存在时回退到存储根目录
-        try await startServer(Router.Config(liveReload: false, siteRoot: "missing"))
-        let (fallback, _) = try await send("/")
-        XCTAssertTrue(text(fallback).contains("Home"))
+        // history 路由刷新后地址里没有站点名，按最近访问的站点回退
+        let (routed, _) = try await send("/about", headers: ["Accept": "text/html", "Cookie": "ls_site=site2"])
+        XCTAssertEqual(text(routed), "<p>site2</p>")
+    }
+
+    // MARK: - 多站点
+
+    private func origin() -> String {
+        "http://127.0.0.1:\(port)"
+    }
+
+    func testEachSiteIsItsOwnRoot() async throws {
+        let (index, response) = try await send("/site1/")
+        XCTAssertEqual(response.statusCode, 200)
+        XCTAssertTrue(text(index).contains("site1"))
+        XCTAssertTrue(response.value(forHTTPHeaderField: "Set-Cookie")?.hasPrefix("ls_site=site1;") == true)
+
+        let (css1, _) = try await send("/site1/css/app.css")
+        XCTAssertEqual(text(css1), "s1")
+        let (css2, _) = try await send("/site2/css/app.css")
+        XCTAssertEqual(text(css2), "s2")
+    }
+
+    func testSiteWithoutTrailingSlashRedirects() async throws {
+        let (body, response) = try await send("/site2")
+        XCTAssertTrue(response.url?.absoluteString.hasSuffix("/site2/") == true)
+        XCTAssertEqual(text(body), "<p>site2</p>")
+    }
+
+    func testAbsolutePathsResolveByReferer() async throws {
+        // 站点页面中的 /css/app.css 按来源页归属到对应站点
+        let (fromSite1, r1) = try await send("/css/app.css", headers: ["Referer": origin() + "/site1/"])
+        XCTAssertEqual(r1.statusCode, 200)
+        XCTAssertEqual(text(fromSite1), "s1")
+        let (fromSite2, _) = try await send("/css/app.css", headers: ["Referer": origin() + "/site2/index.html"])
+        XCTAssertEqual(text(fromSite2), "s2")
+
+        // 站点中跳转到以 / 开头的页面
+        let (page, _) = try await send("/page.html", headers: ["Referer": origin() + "/site1/"])
+        XCTAssertEqual(text(page), "<p>page</p>")
+
+        // 从站点 1 链接到站点 2 的地址仍然指向站点 2
+        let (crossSite, _) = try await send("/site2/css/app.css", headers: ["Referer": origin() + "/site1/"])
+        XCTAssertEqual(text(crossSite), "s2")
+    }
+
+    func testAbsolutePathsResolveByCookieWithoutReferer() async throws {
+        let (body, response) = try await send("/css/app.css", headers: ["Cookie": "ls_site=site2"])
+        XCTAssertEqual(response.statusCode, 200)
+        XCTAssertEqual(text(body), "s2")
+
+        // 没有任何来源信息时找不到
+        let (_, missing) = try await send("/css/app.css")
+        XCTAssertEqual(missing.statusCode, 404)
+    }
+
+    func testDisabledSiteIsInaccessible() async throws {
+        try await startServer(Router.Config(liveReload: false, disabledSites: ["site2"]))
+        let (body, response) = try await send("/site2/")
+        XCTAssertEqual(response.statusCode, 403)
+        XCTAssertTrue(text(body).contains("站点未开启"))
+        let (_, asset) = try await send("/site2/css/app.css")
+        XCTAssertEqual(asset.statusCode, 403)
+
+        // 不出现在站点列表中，也不能通过来源页或 Cookie 间接访问
+        let (portal, _) = try await send("/")
+        XCTAssertFalse(text(portal).contains("href=\"/site2/\""))
+        XCTAssertTrue(text(portal).contains("href=\"/site1/\""))
+        let (_, viaReferer) = try await send("/css/app.css", headers: ["Referer": origin() + "/site2/"])
+        XCTAssertEqual(viaReferer.statusCode, 404)
+        let (_, viaCookie) = try await send("/css/app.css", headers: ["Cookie": "ls_site=site2"])
+        XCTAssertEqual(viaCookie.statusCode, 404)
+    }
+
+    func testSiteNameRecordedForStatistics() async throws {
+        let logs = LockedValue<[RequestLog]>([])
+        server?.onRequest = { log in
+            logs.value = logs.value + [log]
+        }
+        try await send("/site1/css/app.css")
+        try await send("/css/app.css", headers: ["Referer": origin() + "/site2/"])
+        try await send("/data.txt")
+        try await Task.sleep(nanoseconds: 200_000_000)
+        XCTAssertEqual(logs.value.map(\.site), ["site1", "site2", nil])
+    }
+
+    // MARK: - 拉黑
+
+    func testBlockedClientIsRejected() async throws {
+        let blocked = LockedValue(0)
+        server?.onBlocked = { _ in
+            blocked.value = blocked.value + 1
+        }
+        server?.updateBlocklist(["127.0.0.1"])
+        do {
+            _ = try await send("/data.txt")
+            XCTFail("被拉黑的设备不应该收到响应")
+        } catch {
+            // 连接被直接断开
+        }
+        XCTAssertGreaterThan(blocked.value, 0)
+
+        server?.updateBlocklist([])
+        let (body, response) = try await send("/data.txt")
+        XCTAssertEqual(response.statusCode, 200)
+        XCTAssertEqual(text(body), "0123456789")
     }
 
     func testLiveReload() async throws {
         try await startServer(Router.Config(liveReload: true))
-        let (page, _) = try await send("/")
+        let (page, _) = try await send("/site2/")
         XCTAssertTrue(text(page).contains(LiveReload.scriptTag))
 
         let (script, scriptResponse) = try await send(LiveReload.scriptPath)

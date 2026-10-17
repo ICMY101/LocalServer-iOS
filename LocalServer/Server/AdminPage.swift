@@ -4,24 +4,23 @@ import Foundation
 enum AdminPage {
     /// 两个页面共用的样式
     private static let baseStyle = #"""
-:root{color-scheme:light dark;--bg:#f3f4f8;--card:#fff;--fg:#14161f;--muted:#6b7084;--line:#e4e6ee;--soft:#f6f7fb;
---accent:#3b6cff;--accent2:#7a4dff;--accentSoft:rgba(59,108,255,.1);--ok:#16a34a;--danger:#e5484d;--warn:#f59e0b;
---shadow:0 1px 2px rgba(20,22,31,.04),0 8px 24px rgba(20,22,31,.06);--radius:18px}
-@media(prefers-color-scheme:dark){:root{--bg:#0b0c10;--card:#16181f;--fg:#eef0f6;--muted:#9097ab;--line:#262935;--soft:#1c1f28;
---accent:#6b8cff;--accent2:#a084ff;--accentSoft:rgba(107,140,255,.14);--shadow:0 1px 2px rgba(0,0,0,.3),0 8px 24px rgba(0,0,0,.35)}}
+:root{color-scheme:light dark;--bg:#f5f5f7;--card:#ffffff;--fg:#1d1d1f;--muted:#6e6e73;--line:#d2d2d7;--soft:#f5f5f7;--fill:#e8e8ed;
+--accent:#0071e3;--accentSoft:rgba(0,113,227,.1);--ok:#1d8a3a;--danger:#e30000;--radius:18px}
+@media(prefers-color-scheme:dark){:root{--bg:#000000;--card:#1c1c1e;--fg:#f5f5f7;--muted:#a1a1a6;--line:#38383a;--soft:#2c2c2e;--fill:#3a3a3c;
+--accent:#2997ff;--accentSoft:rgba(41,151,255,.16);--ok:#30d158;--danger:#ff453a}}
 *{box-sizing:border-box}
 html,body{margin:0}
-body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;background:var(--bg);color:var(--fg);-webkit-font-smoothing:antialiased}
+body{font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","Helvetica Neue","PingFang SC","Microsoft YaHei",sans-serif;background:var(--bg);color:var(--fg);-webkit-font-smoothing:antialiased;letter-spacing:-.01em}
 button{font:inherit;cursor:pointer;border:0;background:none;color:inherit}
-.btn{display:inline-flex;align-items:center;gap:6px;font-size:14px;font-weight:600;border-radius:10px;padding:9px 14px;background:var(--accent);color:#fff;transition:transform .1s,opacity .15s;text-decoration:none}
-.btn:hover{opacity:.92}.btn:active{transform:scale(.97)}
-.btn.ghost{background:var(--soft);color:var(--fg);border:1px solid var(--line)}
-.btn.small{padding:6px 10px;font-size:13px}
-.btn svg{width:16px;height:16px}
-.brand{display:flex;align-items:center;gap:10px;font-weight:700;font-size:17px}
-.logo{width:34px;height:34px;border-radius:10px;background:linear-gradient(135deg,var(--accent),var(--accent2));display:grid;place-items:center;color:#fff;box-shadow:0 4px 12px rgba(59,108,255,.35)}
-.logo svg{width:19px;height:19px}
-#toast{position:fixed;left:50%;bottom:28px;transform:translate(-50%,20px);opacity:0;background:rgba(20,22,31,.92);color:#fff;padding:11px 18px;border-radius:12px;font-size:14px;max-width:min(90vw,520px);transition:.25s;pointer-events:none;z-index:50}
+.btn{display:inline-flex;align-items:center;gap:6px;font-size:14px;font-weight:500;border-radius:980px;padding:8px 16px;background:var(--accent);color:#fff;transition:opacity .15s;text-decoration:none}
+.btn:hover{opacity:.88}.btn:active{opacity:.75}
+.btn.ghost{background:var(--fill);color:var(--fg)}
+.btn.small{padding:6px 13px;font-size:13px}
+.btn svg{width:15px;height:15px}
+.brand{display:flex;align-items:center;gap:10px;font-weight:600;font-size:17px}
+.logo{width:30px;height:30px;border-radius:8px;background:var(--fg);display:grid;place-items:center;color:var(--bg)}
+.logo svg{width:17px;height:17px}
+#toast{position:fixed;left:50%;bottom:28px;transform:translate(-50%,20px);opacity:0;background:rgba(29,29,31,.92);color:#fff;padding:11px 20px;border-radius:980px;font-size:14px;max-width:min(90vw,520px);transition:.25s;pointer-events:none;z-index:50}
 #toast.show{opacity:1;transform:translate(-50%,0)}
 """#
 
@@ -38,13 +37,13 @@ button{font:inherit;cursor:pointer;border:0;background:none;color:inherit}
 <style>
 """# + baseStyle + #"""
 body{min-height:100vh;display:grid;place-items:center;padding:20px}
-.card{width:100%;max-width:440px;background:var(--card);border-radius:24px;padding:36px 28px 28px;box-shadow:var(--shadow);text-align:center}
-.hero{width:72px;height:72px;margin:0 auto 18px;border-radius:22px;background:linear-gradient(135deg,var(--accent),var(--accent2));display:grid;place-items:center;color:#fff;box-shadow:0 10px 30px rgba(59,108,255,.35)}
+.card{width:100%;max-width:460px;background:var(--card);border-radius:24px;padding:44px 32px 32px;text-align:center}
+.hero{width:64px;height:64px;margin:0 auto 22px;border-radius:18px;background:var(--fill);display:grid;place-items:center;color:var(--fg)}
 .hero svg{width:36px;height:36px}
-h1{font-size:22px;margin:0 0 8px}
-p.lead{color:var(--muted);font-size:14px;line-height:1.6;margin:0 0 26px}
+h1{font-size:32px;font-weight:700;letter-spacing:-.03em;margin:0 0 10px}
+p.lead{color:var(--muted);font-size:17px;line-height:1.5;margin:0 0 30px}
 .pin{display:flex;justify-content:center;gap:8px;margin-bottom:6px}
-.pin input{width:48px;height:58px;border-radius:14px;border:1.5px solid var(--line);background:var(--soft);color:var(--fg);font-size:26px;font-weight:700;text-align:center;font-variant-numeric:tabular-nums;transition:border-color .15s,box-shadow .15s}
+.pin input{width:50px;height:60px;border-radius:12px;border:1px solid var(--line);background:var(--bg);color:var(--fg);font-size:26px;font-weight:700;text-align:center;font-variant-numeric:tabular-nums;transition:border-color .15s,box-shadow .15s}
 .pin input:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 4px var(--accentSoft)}
 .pin .gap{width:8px}
 .pin.shake{animation:shake .4s}
@@ -53,7 +52,7 @@ p.lead{color:var(--muted);font-size:14px;line-height:1.6;margin:0 0 26px}
 #status{min-height:22px;font-size:13px;color:var(--muted);margin:14px 0 18px}
 #status.err{color:var(--danger)}#status.ok{color:var(--ok)}
 .foot{display:flex;justify-content:center;gap:8px;flex-wrap:wrap}
-.steps{text-align:left;background:var(--soft);border-radius:14px;padding:14px 16px;margin-top:22px;font-size:13px;color:var(--muted);line-height:1.7}
+.steps{text-align:left;border-top:1px solid var(--line);padding-top:20px;margin-top:26px;font-size:13px;color:var(--muted);line-height:1.8}
 .steps b{color:var(--fg)}
 @media(max-width:400px){.pin input{width:40px;height:50px;font-size:22px}}
 </style>
@@ -181,14 +180,14 @@ header{position:sticky;top:0;z-index:10;background:var(--bg);backdrop-filter:sat
 .brand small{display:block;font-weight:500;font-size:12px;color:var(--muted)}
 main{max-width:1080px;margin:0 auto;padding:22px 20px 80px;display:grid;grid-template-columns:340px 1fr;gap:20px;align-items:start}
 @media(max-width:860px){main{grid-template-columns:1fr}}
-.card{background:var(--card);border-radius:var(--radius);box-shadow:var(--shadow);padding:18px}
-.card h2{font-size:15px;margin:0 0 14px;display:flex;align-items:center;gap:8px}
+.card{background:var(--card);border-radius:var(--radius);padding:22px}
+.card h2{font-size:19px;font-weight:600;letter-spacing:-.02em;margin:0 0 16px;display:flex;align-items:center;gap:8px}
 .card h2 .count{font-size:12px;font-weight:600;color:var(--muted);background:var(--soft);border-radius:20px;padding:2px 8px}
 .side{display:flex;flex-direction:column;gap:20px;position:sticky;top:80px}
 @media(max-width:860px){.side{position:static}}
-#drop{border:2px dashed var(--line);border-radius:16px;padding:26px 16px;text-align:center;transition:.2s;background:var(--soft)}
-#drop.over{border-color:var(--accent);background:var(--accentSoft);transform:scale(1.01)}
-#drop .icon{width:54px;height:54px;margin:0 auto 12px;border-radius:16px;background:var(--accentSoft);color:var(--accent);display:grid;place-items:center}
+#drop{border:1.5px dashed var(--line);border-radius:14px;padding:28px 16px;text-align:center;transition:.2s;background:var(--bg)}
+#drop.over{border-color:var(--accent);background:var(--accentSoft)}
+#drop .icon{width:48px;height:48px;margin:0 auto 12px;border-radius:50%;background:var(--fill);color:var(--fg);display:grid;place-items:center}
 #drop .icon svg{width:28px;height:28px}
 #drop p{margin:0 0 14px;color:var(--muted);font-size:13px;line-height:1.6}
 #drop p b{color:var(--fg);font-size:15px}
@@ -200,7 +199,7 @@ main{max-width:1080px;margin:0 auto;padding:22px 20px 80px;display:grid;grid-tem
 .q .nm{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .q .meta{font-size:12px;color:var(--muted)}
 .q .track{grid-column:2/4;height:4px;background:var(--line);border-radius:2px;overflow:hidden;margin-top:-4px}
-.q .fill{height:100%;width:0;background:linear-gradient(90deg,var(--accent),var(--accent2));transition:width .15s}
+.q .fill{height:100%;width:0;background:var(--accent);transition:width .15s}
 .q.done .fill{background:var(--ok)}.q.fail .fill{background:var(--danger);width:100%!important}
 .q .st{font-size:12px;font-weight:600;color:var(--muted)}.q.done .st{color:var(--ok)}.q.fail .st{color:var(--danger)}
 .empty-q{font-size:13px;color:var(--muted);text-align:center;padding:8px 0}
@@ -211,13 +210,13 @@ main{max-width:1080px;margin:0 auto;padding:22px 20px 80px;display:grid;grid-tem
 .crumbs a.cur{color:var(--fg);font-weight:700}
 .crumbs .sep{color:var(--line)}
 .search{position:relative}
-.search input{font:inherit;font-size:13px;padding:8px 12px 8px 32px;border-radius:10px;border:1px solid var(--line);background:var(--soft);color:var(--fg);width:180px}
+.search input{font:inherit;font-size:13px;padding:8px 14px 8px 32px;border-radius:980px;border:0;background:var(--fill);color:var(--fg);width:190px}
 .search input:focus{outline:none;border-color:var(--accent)}
 .search svg{position:absolute;left:10px;top:50%;transform:translateY(-50%);width:15px;height:15px;color:var(--muted)}
 .list{display:flex;flex-direction:column}
 .item{display:grid;grid-template-columns:40px 1fr 90px 130px auto;gap:12px;align-items:center;padding:9px 8px;border-radius:12px;transition:background .12s}
 .item:hover{background:var(--soft)}
-.item .ic{width:36px;height:36px;border-radius:10px;display:grid;place-items:center;font-size:10px;font-weight:800;letter-spacing:.3px;color:#fff}
+.item .ic{width:36px;height:36px;border-radius:9px;display:grid;place-items:center;font-size:9px;font-weight:700;letter-spacing:.3px;color:var(--muted);background:var(--fill)}
 .item .ic svg{width:18px;height:18px}
 .item .nm{min-width:0;font-size:14px;font-weight:500;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .item .nm:hover{color:var(--accent)}
@@ -228,11 +227,12 @@ main{max-width:1080px;margin:0 auto;padding:22px 20px 80px;display:grid;grid-tem
 .acts button:hover,.acts a:hover{background:var(--card);color:var(--fg)}
 .acts .del:hover{color:var(--danger)}
 .acts svg{width:16px;height:16px}
-.tag{font-size:11px;font-weight:700;color:var(--accent);background:var(--accentSoft);border-radius:6px;padding:2px 6px;margin-left:8px;vertical-align:1px}
+.tag{font-size:11px;font-weight:600;color:var(--muted);background:var(--fill);border-radius:980px;padding:2px 8px;margin-left:8px;vertical-align:1px}
+.tag.off{color:var(--danger)}
 @media(max-width:640px){.item{grid-template-columns:36px 1fr auto}.item .sz,.item .dt{display:none}.search input{width:130px}}
 .empty{text-align:center;color:var(--muted);padding:48px 12px;font-size:14px}
 .empty svg{width:44px;height:44px;color:var(--line);display:block;margin:0 auto 10px}
-#overlay{position:fixed;inset:0;background:rgba(59,108,255,.12);border:3px dashed var(--accent);border-radius:20px;margin:10px;display:none;place-items:center;z-index:40;pointer-events:none;font-size:20px;font-weight:700;color:var(--accent)}
+#overlay{position:fixed;inset:0;background:var(--accentSoft);border:2px dashed var(--accent);border-radius:20px;margin:10px;display:none;place-items:center;z-index:40;pointer-events:none;font-size:20px;font-weight:700;color:var(--accent)}
 #overlay.show{display:grid}
 </style>
 </head>
@@ -241,7 +241,7 @@ main{max-width:1080px;margin:0 auto;padding:22px 20px 80px;display:grid;grid-tem
   <div class="bar">
     <div class="brand"><div class="logo"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M4 12h16M4 17h16"/></svg></div><div>本地服务器<small id="where">文件管理</small></div></div>
     <div class="spacer"></div>
-    <a class="btn ghost small" href="/" target="_blank"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6M15 3h6v6M10 14 21 3"/></svg>打开网站</a>
+    <a class="btn ghost small" href="/" target="_blank" title="所有站点"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6M15 3h6v6M10 14 21 3"/></svg>所有站点</a>
     <button class="btn ghost small" id="unpair" style="display:none">取消配对</button>
   </div>
 </header>
@@ -252,7 +252,7 @@ main{max-width:1080px;margin:0 auto;padding:22px 20px 80px;display:grid;grid-tem
       <h2>上传</h2>
       <div id="drop">
         <div class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 16l-4-4-4 4M12 12v9"/><path d="M20.4 18.4A5 5 0 0 0 18 9h-1.3A8 8 0 1 0 3 16.3"/></svg></div>
-        <p><b>拖入文件、文件夹或 zip</b><br>上传到当前打开的目录</p>
+        <p><b>拖入文件、文件夹或 zip</b><br>上传到当前打开的目录。<br>www 下的每个文件夹都是一个站点。</p>
         <div class="row">
           <button class="btn small" id="pickBtn">选择文件</button>
           <button class="btn ghost small" id="pickDirBtn">选择文件夹</button>
@@ -292,7 +292,7 @@ const encPath = p => p.split('/').map(encodeURIComponent).join('/');
 const isHidden = path => path.split('/').some(s => s.startsWith('.'));
 
 let cwd = decodeURIComponent(location.hash.slice(1)) || '/';
-let siteRoot = '/';
+let disabledSites = [];
 let items = [];
 let queue = [];
 let uploading = false;
@@ -341,10 +341,11 @@ async function api(method, name, params) {
 }
 
 // ---------- 文件列表 ----------
+function siteOf(p) { return p.split('/').filter(Boolean)[0] || ''; }
 function webURL(p) {
-  if (siteRoot === '/') return encPath(p);
-  if (p.startsWith(siteRoot + '/')) return encPath(p.slice(siteRoot.length));
-  return null;
+  const site = siteOf(p);
+  if (site && disabledSites.includes(site)) return null;
+  return encPath(p);
 }
 
 function renderCrumbs() {
@@ -367,12 +368,13 @@ function renderList() {
   }
   $('#list').innerHTML = shown.map(it => {
     const p = join(cwd, it.name);
-    const t = it.dir ? {label: '', color: 'var(--accent)'} : typeOf(it.name);
+    const t = it.dir ? {label: ''} : typeOf(it.name);
     const icon = it.dir ? ICONS.folder : t.label;
-    const tag = it.dir && p === siteRoot ? '<span class="tag">当前网站</span>' : '';
+    const isSite = it.dir && cwd === '/';
+    const tag = isSite ? (disabledSites.includes(it.name) ? '<span class="tag off">未开启</span>' : '<span class="tag">站点</span>') : '';
     const dl = it.dir ? '' : `<a href="${API}download?path=${encodeURIComponent(p)}" title="下载">${ICONS.download}</a>`;
     return `<div class="item" data-name="${esc(it.name)}">
-      <div class="ic" style="background:${t.color}">${icon}</div>
+      <div class="ic"${it.dir ? ' style="color:var(--accent)"' : ''}>${icon}</div>
       <div class="nm" data-open>${esc(it.name)}${tag}</div>
       <div class="sz">${it.dir ? '—' : fmtSize(it.size)}</div>
       <div class="dt">${fmtDate(it.mtime)}</div>
@@ -393,7 +395,7 @@ async function load() {
   try {
     const data = await api('GET', 'list', {path: cwd});
     items = data.items;
-    siteRoot = data.siteRoot || '/';
+    disabledSites = data.disabledSites || [];
     $('#unpair').style.display = data.paired ? 'inline-flex' : 'none';
     renderList();
   } catch (e) {
@@ -408,7 +410,7 @@ function openItem(it) {
   const p = join(cwd, it.name);
   if (it.dir) return go(p);
   const url = webURL(p);
-  url ? window.open(url, '_blank') : toast('该文件不在当前网站目录（' + siteRoot + '）中，可以下载查看');
+  url ? window.open(url, '_blank') : toast('站点「' + siteOf(p) + '」未开启，可以在手机上开启，或直接下载文件');
 }
 
 async function mkdir() {
@@ -438,7 +440,7 @@ function renderQueue() {
     const t = typeOf(q.path);
     const st = {wait: '等待中', run: Math.round(q.progress * 100) + '%', done: q.note || '完成', fail: '失败'}[q.state];
     return `<div class="q ${q.state}" title="${esc(q.error || q.path)}">
-      <div class="ic" style="width:28px;height:28px;border-radius:8px;display:grid;place-items:center;font-size:8px;font-weight:800;color:#fff;background:${t.color}">${t.label}</div>
+      <div style="width:28px;height:28px;border-radius:7px;display:grid;place-items:center;font-size:8px;font-weight:700;color:var(--muted);background:var(--fill)">${t.label}</div>
       <div style="min-width:0"><div class="nm">${esc(q.path)}</div><div class="meta">${fmtSize(q.file.size)}</div></div>
       <div class="st">${st}</div>
       <div class="track"><div class="fill" style="width:${q.state === 'done' ? 100 : q.progress * 100}%"></div></div>

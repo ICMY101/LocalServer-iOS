@@ -1,41 +1,17 @@
 import SwiftUI
 
-/// 全局视觉规范：品牌色、卡片、图标徽章、文件类型配色
+/// 全局视觉规范：参考苹果官网的设计语言——
+/// 中性灰背景、白色圆角卡片、单一的蓝色强调色、大而清晰的标题，不使用渐变。
 enum Theme {
-    static let brandBlue = Color(red: 0.23, green: 0.42, blue: 1.0)
-    static let brandPurple = Color(red: 0.48, green: 0.30, blue: 1.0)
-
-    static let brandGradient = LinearGradient(
-        colors: [brandBlue, brandPurple],
-        startPoint: .topLeading,
-        endPoint: .bottomTrailing
-    )
-
-    static let runningGradient = LinearGradient(
-        colors: [Color(red: 0.05, green: 0.66, blue: 0.56), Color(red: 0.16, green: 0.47, blue: 0.98)],
-        startPoint: .topLeading,
-        endPoint: .bottomTrailing
-    )
-
-    static let stoppedGradient = LinearGradient(
-        colors: [Color(red: 0.33, green: 0.36, blue: 0.45), Color(red: 0.20, green: 0.22, blue: 0.29)],
-        startPoint: .topLeading,
-        endPoint: .bottomTrailing
-    )
-
-    static let failedGradient = LinearGradient(
-        colors: [Color(red: 0.93, green: 0.33, blue: 0.30), Color(red: 0.96, green: 0.55, blue: 0.20)],
-        startPoint: .topLeading,
-        endPoint: .bottomTrailing
-    )
-
-    static let cardRadius: CGFloat = 20
+    static let cardRadius: CGFloat = 18
+    static let accent = Color.accentColor
+    static let positive = Color.green
 }
 
 // MARK: - 卡片
 
 struct CardBackground: ViewModifier {
-    var padding: CGFloat = 16
+    var padding: CGFloat = 18
 
     func body(content: Content) -> some View {
         content
@@ -49,12 +25,12 @@ struct CardBackground: ViewModifier {
 }
 
 extension View {
-    func card(padding: CGFloat = 16) -> some View {
+    func card(padding: CGFloat = 18) -> some View {
         modifier(CardBackground(padding: padding))
     }
 }
 
-/// 卡片上方的小标题
+/// 区块标题：大号粗体，右侧可放“全部”等链接
 struct SectionTitle: View {
     let title: String
     var trailing: AnyView?
@@ -70,52 +46,78 @@ struct SectionTitle: View {
     }
 
     var body: some View {
-        HStack {
+        HStack(alignment: .firstTextBaseline) {
             Text(title)
-                .font(.subheadline.weight(.semibold))
-                .foregroundColor(.secondary)
+                .font(.title3.weight(.bold))
             Spacer()
             trailing
+                .font(.subheadline)
         }
-        .padding(.horizontal, 4)
-        .padding(.top, 8)
+        .padding(.horizontal, 2)
     }
 }
 
-// MARK: - 图标徽章
+// MARK: - 图标
 
-/// 圆角方块里的白色 SF Symbol，类似系统“设置”的图标
+/// 浅灰圆角底上的单色符号
 struct IconBadge: View {
     let systemName: String
-    let color: Color
-    var size: CGFloat = 30
+    var color: Color = .secondary
+    var size: CGFloat = 36
 
     var body: some View {
         Image(systemName: systemName)
-            .font(.system(size: size * 0.5, weight: .semibold))
-            .foregroundColor(.white)
+            .font(.system(size: size * 0.44, weight: .medium))
+            .foregroundColor(color)
             .frame(width: size, height: size)
-            .background(color.gradient, in: RoundedRectangle(cornerRadius: size * 0.28, style: .continuous))
+            .background(Color(.tertiarySystemFill), in: RoundedRectangle(cornerRadius: size * 0.27, style: .continuous))
     }
 }
 
-/// 设置项的标签：彩色图标 + 文字
+/// 设置项的标签：强调色单色图标 + 文字
 struct SettingsLabel: View {
     let title: String
     let systemName: String
-    let color: Color
 
-    init(_ title: String, systemName: String, color: Color) {
+    init(_ title: String, systemName: String) {
         self.title = title
         self.systemName = systemName
-        self.color = color
     }
 
     var body: some View {
-        HStack(spacing: 12) {
-            IconBadge(systemName: systemName, color: color, size: 29)
+        Label {
             Text(title)
+        } icon: {
+            Image(systemName: systemName)
+                .foregroundColor(.accentColor)
         }
+    }
+}
+
+/// 状态小圆点
+struct StatusDot: View {
+    let color: Color
+    var size: CGFloat = 8
+
+    var body: some View {
+        Circle()
+            .fill(color)
+            .frame(width: size, height: size)
+    }
+}
+
+/// 灰底小标签，例如“已关闭”“已拉黑”
+struct PillTag: View {
+    let text: String
+    var color: Color = .secondary
+
+    var body: some View {
+        Text(text)
+            .font(.caption2.weight(.semibold))
+            .foregroundColor(color)
+            .padding(.horizontal, 7)
+            .padding(.vertical, 2)
+            .background(Color(.tertiarySystemFill), in: Capsule())
     }
 }
 
@@ -123,43 +125,41 @@ struct SettingsLabel: View {
 
 struct FileKind {
     let symbol: String
-    let color: Color
     let label: String
 
     static func of(_ item: FileItem) -> FileKind {
         if item.isDirectory {
-            return FileKind(symbol: "folder.fill", color: Theme.brandBlue, label: "文件夹")
+            return FileKind(symbol: "folder", label: "文件夹")
         }
         return of(extension: item.url.pathExtension)
     }
 
     static func of(extension ext: String) -> FileKind {
         switch ext.lowercased() {
-        case "html", "htm":
-            return FileKind(symbol: "globe", color: .orange, label: "网页")
-        case "css":
-            return FileKind(symbol: "paintbrush.fill", color: .blue, label: "样式")
-        case "js", "mjs", "ts", "jsx", "tsx", "vue":
-            return FileKind(symbol: "curlybraces", color: Color(red: 0.85, green: 0.65, blue: 0.0), label: "脚本")
-        case "json", "xml", "webmanifest", "map":
-            return FileKind(symbol: "doc.text.fill", color: .gray, label: "数据")
-        case "png", "jpg", "jpeg", "gif", "webp", "svg", "ico", "avif", "heic", "bmp":
-            return FileKind(symbol: "photo.fill", color: .green, label: "图片")
-        case "mp4", "mov", "m4v", "webm":
-            return FileKind(symbol: "film.fill", color: .purple, label: "视频")
-        case "mp3", "m4a", "wav", "aac", "ogg", "flac":
-            return FileKind(symbol: "music.note", color: .pink, label: "音频")
-        case "woff", "woff2", "ttf", "otf":
-            return FileKind(symbol: "textformat", color: .teal, label: "字体")
-        case "pdf":
-            return FileKind(symbol: "doc.richtext.fill", color: .red, label: "PDF")
-        case "zip":
-            return FileKind(symbol: "doc.zipper", color: .indigo, label: "压缩包")
-        case "md", "txt", "csv":
-            return FileKind(symbol: "doc.plaintext.fill", color: .gray, label: "文本")
-        default:
-            return FileKind(symbol: "doc.fill", color: Color(.systemGray2), label: "文件")
+        case "html", "htm": return FileKind(symbol: "safari", label: "网页")
+        case "css": return FileKind(symbol: "paintbrush", label: "样式")
+        case "js", "mjs", "ts", "jsx", "tsx", "vue": return FileKind(symbol: "curlybraces", label: "脚本")
+        case "json", "xml", "webmanifest", "map": return FileKind(symbol: "doc.text", label: "数据")
+        case "png", "jpg", "jpeg", "gif", "webp", "svg", "ico", "avif", "heic", "bmp": return FileKind(symbol: "photo", label: "图片")
+        case "mp4", "mov", "m4v", "webm": return FileKind(symbol: "film", label: "视频")
+        case "mp3", "m4a", "wav", "aac", "ogg", "flac": return FileKind(symbol: "music.note", label: "音频")
+        case "woff", "woff2", "ttf", "otf": return FileKind(symbol: "textformat", label: "字体")
+        case "pdf": return FileKind(symbol: "doc.richtext", label: "PDF")
+        case "zip": return FileKind(symbol: "doc.zipper", label: "压缩包")
+        case "md", "txt", "csv": return FileKind(symbol: "doc.plaintext", label: "文本")
+        default: return FileKind(symbol: "doc", label: "文件")
         }
+    }
+}
+
+/// 根据设备名选择图标
+enum DeviceSymbol {
+    static func of(_ name: String) -> String {
+        if name.hasPrefix("iPhone") || name.hasPrefix("Android") { return "iphone" }
+        if name.hasPrefix("iPad") { return "ipad" }
+        if name.hasPrefix("Mac") { return "laptopcomputer" }
+        if name.hasPrefix("Windows") || name.hasPrefix("Linux") || name.hasPrefix("ChromeOS") { return "desktopcomputer" }
+        return "network"
     }
 }
 
@@ -197,22 +197,20 @@ enum Format {
         if hours < 24 { return "\(hours) 小时 \(minutes % 60) 分" }
         return "\(hours / 24) 天 \(hours % 24) 小时"
     }
-
-    /// 6 位配对码显示为“123 456”
-    static func pin(_ pin: String) -> String {
-        guard pin.count == 6 else { return pin }
-        return String(pin.prefix(3)) + " " + String(pin.suffix(3))
-    }
 }
 
 // MARK: - 触感反馈
 
 enum Haptics {
     static func tap() {
-        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
     }
 
     static func success() {
         UINotificationFeedbackGenerator().notificationOccurred(.success)
+    }
+
+    static func warning() {
+        UINotificationFeedbackGenerator().notificationOccurred(.warning)
     }
 }

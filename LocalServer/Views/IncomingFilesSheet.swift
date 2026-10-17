@@ -64,12 +64,9 @@ struct IncomingFilesSheet: View {
         .onAppear {
             folders = FileStore.allFolders()
             extractZips = server.settings.autoExtractZip
-            if folders.contains(server.settings.siteRoot) {
-                destination = server.settings.siteRoot
-            }
-            // 多个普通文件默认放进同一个新文件夹，避免散落
+            // www 根目录下的文件夹才是站点，普通文件默认放进新文件夹（即新建一个站点）
             let looseFiles = server.incomingURLs.filter { $0.pathExtension.lowercased() != "zip" }
-            useNewFolder = looseFiles.count > 1
+            useNewFolder = !looseFiles.isEmpty
             newFolderName = FileStore.defaultFolderName(for: server.incomingURLs)
         }
     }
@@ -78,6 +75,9 @@ struct IncomingFilesSheet: View {
         var lines: [String] = []
         if hasZip && extractZips {
             lines.append("zip 会解压到以其文件名命名的文件夹中；如果 zip 里本身只有一个文件夹，就直接使用它。")
+        }
+        if destination.isEmpty {
+            lines.append("www 根目录下的每个文件夹都是一个站点，可以通过 /文件夹名/ 访问。")
         }
         lines.append("同名文件会被覆盖。")
         return lines.joined(separator: "\n")

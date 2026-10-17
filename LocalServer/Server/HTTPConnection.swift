@@ -45,7 +45,7 @@ final class HTTPConnection {
         self.handler = handler
         self.onResponse = onResponse
         self.onClose = onClose
-        self.remoteAddress = Self.describe(connection.endpoint)
+        self.remoteAddress = Self.address(of: connection.endpoint)
     }
 
     func start() {
@@ -384,7 +384,8 @@ final class HTTPConnection {
         queue.asyncAfter(deadline: .now() + Self.idleTimeout, execute: item)
     }
 
-    private static func describe(_ endpoint: NWEndpoint) -> String {
+    /// 连接对方的 IP 地址（去掉 IPv6 区域标识和 IPv4 映射前缀）
+    static func address(of endpoint: NWEndpoint) -> String {
         guard case let .hostPort(host, _) = endpoint else {
             return "\(endpoint)"
         }

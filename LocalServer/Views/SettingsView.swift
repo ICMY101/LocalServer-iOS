@@ -28,7 +28,7 @@ struct SettingsView: View {
             .onChange(of: portFocused) { focused in
                 if !focused { applyPort() }
             }
-            .confirmationDialog("用示例页面覆盖 www 中的 index.html？", isPresented: $confirmRestore, titleVisibility: .visible) {
+            .confirmationDialog("重新创建“示例站点”？会覆盖其中的 index.html。", isPresented: $confirmRestore, titleVisibility: .visible) {
                 Button("覆盖", role: .destructive) {
                     try? FileStore.restoreWelcomePage()
                     server.notifyFilesChanged()
@@ -43,10 +43,10 @@ struct SettingsView: View {
         Section {
             HStack(spacing: 14) {
                 Image(systemName: "server.rack")
-                    .font(.system(size: 26, weight: .semibold))
-                    .foregroundColor(.white)
+                    .font(.system(size: 26, weight: .regular))
+                    .foregroundColor(.accentColor)
                     .frame(width: 58, height: 58)
-                    .background(Theme.brandGradient, in: RoundedRectangle(cornerRadius: 15, style: .continuous))
+                    .background(Color(.tertiarySystemFill), in: RoundedRectangle(cornerRadius: 15, style: .continuous))
                 VStack(alignment: .leading, spacing: 3) {
                     Text("本地服务器")
                         .font(.title3.weight(.bold))
@@ -62,7 +62,7 @@ struct SettingsView: View {
     private var serviceSection: some View {
         Section {
             HStack {
-                SettingsLabel("端口", systemName: "number", color: .gray)
+                SettingsLabel("端口", systemName: "number")
                 Spacer()
                 TextField("8080", text: $portText)
                     .keyboardType(.numberPad)
@@ -72,14 +72,14 @@ struct SettingsView: View {
                     .frame(maxWidth: 110)
             }
             Toggle(isOn: $server.settings.allowLAN) {
-                SettingsLabel("允许局域网访问", systemName: "wifi", color: Theme.brandBlue)
+                SettingsLabel("允许局域网访问", systemName: "wifi")
             }
             Toggle(isOn: $server.settings.bonjour) {
-                SettingsLabel("固定地址（Bonjour）", systemName: "dot.radiowaves.left.and.right", color: .purple)
+                SettingsLabel("固定地址（Bonjour）", systemName: "dot.radiowaves.left.and.right")
             }
             .disabled(!server.settings.allowLAN)
             Toggle(isOn: $server.settings.autoStart) {
-                SettingsLabel("打开 App 时自动启动", systemName: "power", color: .green)
+                SettingsLabel("打开 App 时自动启动", systemName: "power")
             }
         } header: {
             Text("服务")
@@ -95,17 +95,17 @@ struct SettingsView: View {
     private var computerSection: some View {
         Section {
             Toggle(isOn: $server.settings.webAdmin) {
-                SettingsLabel("电脑网页管理", systemName: "desktopcomputer", color: .indigo)
+                SettingsLabel("电脑网页管理", systemName: "desktopcomputer")
             }
             Toggle(isOn: $server.settings.requirePairing) {
-                SettingsLabel("需要配对码", systemName: "lock.shield.fill", color: .green)
+                SettingsLabel("需要配对码", systemName: "lock.shield.fill")
             }
             .disabled(!server.settings.webAdmin)
             NavigationLink {
                 PairedDevicesView()
             } label: {
                 HStack {
-                    SettingsLabel("已配对设备", systemName: "laptopcomputer", color: .blue)
+                    SettingsLabel("已配对设备", systemName: "laptopcomputer")
                     Spacer()
                     Text("\(server.pairedDevices.count)")
                         .foregroundColor(.secondary)
@@ -113,7 +113,7 @@ struct SettingsView: View {
             }
             .disabled(!server.settings.webAdmin || !server.settings.requirePairing)
             Toggle(isOn: $server.settings.autoExtractZip) {
-                SettingsLabel("zip 自动解压", systemName: "doc.zipper", color: .orange)
+                SettingsLabel("zip 自动解压", systemName: "doc.zipper")
             }
         } header: {
             Text("电脑管理")
@@ -127,38 +127,50 @@ struct SettingsView: View {
     private var siteSection: some View {
         Section {
             Toggle(isOn: $server.settings.liveReload) {
-                SettingsLabel("文件变化后自动刷新", systemName: "arrow.clockwise", color: .teal)
+                SettingsLabel("文件变化后自动刷新", systemName: "arrow.clockwise")
             }
             Toggle(isOn: $server.settings.directoryListing) {
-                SettingsLabel("目录列表", systemName: "list.bullet.rectangle", color: .blue)
+                SettingsLabel("目录列表", systemName: "list.bullet.rectangle")
             }
             Toggle(isOn: $server.settings.spaFallback) {
-                SettingsLabel("单页应用回退（SPA）", systemName: "arrow.triangle.branch", color: .pink)
+                SettingsLabel("单页应用回退（SPA）", systemName: "arrow.triangle.branch")
             }
             Toggle(isOn: $server.settings.cors) {
-                SettingsLabel("允许跨域（CORS）", systemName: "globe", color: .cyan)
+                SettingsLabel("允许跨域（CORS）", systemName: "globe")
             }
-            HStack {
-                SettingsLabel("当前网站", systemName: "folder.fill", color: Theme.brandBlue)
-                Spacer()
-                Text(server.siteRootDisplay)
-                    .foregroundColor(.secondary)
-                    .lineLimit(1)
+            NavigationLink {
+                SitesView()
+            } label: {
+                HStack {
+                    SettingsLabel("站点", systemName: "square.stack.3d.up")
+                    Spacer()
+                    Text("\(server.sites.filter { server.isSiteEnabled($0.name) }.count) / \(server.sites.count) 已开启")
+                        .foregroundColor(.secondary)
+                }
             }
-            if !server.settings.siteRoot.isEmpty {
-                Button("恢复以 www 为网站根目录") { server.setSiteRoot(nil) }
+            NavigationLink {
+                DevicesView()
+            } label: {
+                HStack {
+                    SettingsLabel("访问设备", systemName: "person.2")
+                    Spacer()
+                    if !server.settings.blockedClients.isEmpty {
+                        Text("已拉黑 \(server.settings.blockedClients.count)")
+                            .foregroundColor(.secondary)
+                    }
+                }
             }
         } header: {
-            Text("网站")
+            Text("站点")
         } footer: {
-            Text("自动刷新：上传或修改文件后，浏览器中打开的页面会自动重新加载。\n目录列表：文件夹中没有 index.html 时显示文件列表。\nSPA 回退：找不到的页面返回 index.html，适用于 Vue / React 的 history 路由。\n多个网站：在“文件”页长按文件夹，选择“设为网站根目录”。")
+            Text("www 中的每个文件夹都是一个站点，通过 /文件夹名/ 访问，并以自己为根目录。\n自动刷新：上传或修改文件后，浏览器中打开的页面会自动重新加载。\n目录列表：文件夹中没有 index.html 时显示文件列表。\nSPA 回退：找不到的页面返回该站点的 index.html，适用于 Vue / React 的 history 路由。")
         }
     }
 
     private var powerSection: some View {
         Section {
             Toggle(isOn: $server.settings.backgroundAudio) {
-                SettingsLabel("后台保活", systemName: "bolt.fill", color: .yellow)
+                SettingsLabel("后台保活", systemName: "bolt.fill")
             }
             if server.settings.backgroundAudio {
                 Picker(selection: $server.settings.keepAliveIdleMinutes) {
@@ -169,23 +181,23 @@ struct SettingsView: View {
                     Text("2 小时后").tag(120)
                     Text("从不").tag(0)
                 } label: {
-                    SettingsLabel("无访问时停止", systemName: "timer", color: .orange)
+                    SettingsLabel("无访问时停止", systemName: "timer")
                 }
             }
             Toggle(isOn: $server.settings.keepScreenOn) {
-                SettingsLabel("保持屏幕常亮", systemName: "sun.max.fill", color: .red)
+                SettingsLabel("保持屏幕常亮", systemName: "sun.max.fill")
             }
         } header: {
             Text("运行与电量")
         } footer: {
-            Text("网页在系统浏览器中打开时，本 App 会进入后台。开启“后台保活”后，App 只在后台时循环播放静音音频（不影响其他声音），让服务器持续运行；回到前台立即停止。设定时间内一直没有设备访问，就会自动停止以节省电量，重新打开 App 即可恢复。")
+            Text("网页在系统浏览器中打开时，本 App 会进入后台。开启“后台保活”后，仅在服务运行且 App 位于后台时循环播放静音音频（不影响其他声音），让服务器持续运行；回到前台或停止服务时立即停止。设定时间内一直没有设备访问，也会自动停止以节省电量。")
         }
     }
 
     private var aboutSection: some View {
         Section {
             HStack {
-                SettingsLabel("文件位置", systemName: "externaldrive.fill", color: .gray)
+                SettingsLabel("文件位置", systemName: "externaldrive.fill")
                 Spacer()
                 Text("我的 iPhone › 本地服务器 › www")
                     .font(.footnote)
@@ -196,7 +208,7 @@ struct SettingsView: View {
             Button {
                 confirmRestore = true
             } label: {
-                SettingsLabel("恢复示例首页", systemName: "arrow.counterclockwise", color: .gray)
+                SettingsLabel("恢复示例站点", systemName: "arrow.counterclockwise")
             }
             .foregroundColor(.primary)
         } header: {

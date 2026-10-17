@@ -9,6 +9,13 @@ struct PairingCode: Equatable {
     let expires: Date
 }
 
+/// 屏幕底部短暂显示的提示
+struct Toast: Equatable, Identifiable {
+    let id = UUID()
+    let text: String
+    let systemName: String
+}
+
 /// 界面与 HTTPServer 之间的桥梁：保存设置、维护运行状态、局域网地址和后台保活
 @MainActor
 final class ServerManager: ObservableObject {
@@ -34,6 +41,10 @@ final class ServerManager: ObservableObject {
     @Published private(set) var lastPairedAt: Date?
     /// 后台保活关闭时打开浏览器前的提示，不为空时显示
     @Published var pendingBrowserURL: URL?
+    /// www 下的站点（每个一级文件夹）
+    @Published private(set) var sites: [FileStore.SiteInfo] = []
+    /// 屏幕底部的轻提示
+    @Published private(set) var toast: Toast?
     @Published var settings: ServerSettings {
         didSet { settingsChanged(from: oldValue) }
     }
@@ -57,10 +68,7 @@ final class ServerManager: ObservableObject {
     private var backgroundTask: UIBackgroundTaskIdentifier = .invalid
 
     init() {
-        var settings = ServerSettings.load()
-        if !Self.folderExists(settings.siteRoot) {
-            settings.siteRoot = ""
-        }
+        let settings = ServerSettings.load()
         self.settings = settings
         server = HTTPServer(
             rootURL: FileStore.rootURL,
@@ -92,6 +100,10 @@ final class ServerManager: ObservableObject {
         server.onServiceRegistered = { [weak self] name in
             Task { @MainActor in self?.serviceRegistered(name) }
         }
+        server.onBlocked = { [weak self] address in
+            Task { @MainActor in self?.logStore.recordBlocked(address) }
+        }
+        server.updateBlocklist(Set(settings.blockedClients))
         pathMonitor.pathUpdateHandler = { [weak self] _ in
             Task { @MainActor in self?.refreshAddresses() }
         }
@@ -99,6 +111,7 @@ final class ServerManager: ObservableObject {
 
         refreshAddresses()
         refreshPairing()
+        refreshSites()
         if settings.autoStart {
             start()
         }
@@ -137,30 +150,45 @@ final class ServerManager: ObservableObject {
         bonjourHost.flatMap { URL(string: "http://\($0):\(port)/") }
     }
 
-    // MARK: - 网站根目录
+    // MARK: - 站点
 
-    var siteRootURL: URL {
-        settings.siteRoot.isEmpty
-            ? FileStore.rootURL
-            : FileStore.rootURL.appendingPathComponent(settings.siteRoot, isDirectory: true)
+    func refreshSites() {
+        let latest = FileStore.sites()
+        if latest != sites {
+            sites = latest
+        }
     }
 
-    var siteRootDisplay: String {
-        settings.siteRoot.isEmpty ? "www" : "www/" + settings.siteRoot
+    func isSiteEnabled(_ name: String) -> Bool {
+        settings.isSiteEnabled(name)
     }
 
-    func isSiteRoot(_ url: URL) -> Bool {
-        FileStore.relativePath(of: url) == settings.siteRoot
+    func setSite(_ name: String, enabled: Bool) {
+        if enabled {
+            settings.disabledSites.removeAll { $0 == name }
+        } else if !settings.disabledSites.contains(name) {
+            settings.disabledSites.append(name)
+        }
+        showToast(enabled ? "已开启「\(name)」" : "已关闭「\(name)」，无法再访问", systemName: enabled ? "checkmark.circle" : "nosign")
     }
 
-    /// 传入 nil 表示恢复为 www 本身
-    func setSiteRoot(_ url: URL?) {
-        settings.siteRoot = url.flatMap { FileStore.relativePath(of: $0) } ?? ""
+    /// 站点在本机浏览器中的地址，例如 http://127.0.0.1:8080/blog/
+    func siteURL(_ site: FileStore.SiteInfo) -> URL {
+        URL(string: "http://127.0.0.1:\(port)\(site.path)") ?? localURL
     }
 
-    /// 文件在本机浏览器中的访问地址；文件不在当前网站内时返回 nil
+    /// 站点在局域网中的地址；没有局域网时返回本机地址
+    func shareableSiteURL(_ site: FileStore.SiteInfo) -> URL {
+        if settings.allowLAN, let address = lanAddresses.first,
+           let url = URL(string: "http://\(address.ip):\(port)\(site.path)") {
+            return url
+        }
+        return siteURL(site)
+    }
+
+    /// 文件在本机浏览器中的访问地址；不在 www 内时返回 nil
     func webURL(for fileURL: URL) -> URL? {
-        guard let path = FileStore.webPath(for: fileURL, siteRoot: siteRootURL) else { return nil }
+        guard let path = FileStore.webPath(for: fileURL) else { return nil }
         let encoded = path.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? path
         return URL(string: "http://127.0.0.1:\(port)\(encoded)")
     }
@@ -173,8 +201,41 @@ final class ServerManager: ObservableObject {
 
     private func filesChangedByServer() {
         filesVersion += 1
-        if !Self.folderExists(settings.siteRoot) {
-            settings.siteRoot = ""
+        refreshSites()
+    }
+
+    // MARK: - 访问设备
+
+    func isBlocked(_ address: String) -> Bool {
+        settings.isBlocked(address)
+    }
+
+    /// 拉黑后立即断开该设备的所有连接，之后的连接也会被直接拒绝
+    func block(_ address: String) {
+        guard !ClientStats.isLocal(address), !settings.blockedClients.contains(address) else { return }
+        settings.blockedClients.append(address)
+        showToast("已拉黑 \(address)", systemName: "hand.raised")
+    }
+
+    func unblock(_ address: String) {
+        settings.blockedClients.removeAll { $0 == address }
+        showToast("已解除拉黑 \(address)", systemName: "checkmark.circle")
+    }
+
+    // MARK: - 轻提示
+
+    func showToast(_ text: String, systemName: String = "checkmark.circle") {
+        let toast = Toast(text: text, systemName: systemName)
+        withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) {
+            self.toast = toast
+        }
+        Task {
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            if self.toast?.id == toast.id {
+                withAnimation(.easeOut(duration: 0.25)) {
+                    self.toast = nil
+                }
+            }
         }
     }
 
@@ -219,9 +280,10 @@ final class ServerManager: ObservableObject {
             stopIdleTimer()
             endBackgroundTask()
             // 前台不需要保活，立即停止静音播放以节省电量
-            if !(keepAliveStartsInForeground && settings.backgroundAudio && wantsRunning) {
+            if !(keepAliveStartsInForeground && settings.backgroundAudio && wantsRunning && isRunning) {
                 keepAlive.stop()
             }
+            refreshSites()
             refreshAddresses()
             if bonjourHost == nil, isRunning, let serviceName {
                 resolveHost(serviceName)
@@ -233,7 +295,8 @@ final class ServerManager: ObservableObject {
         case .background:
             isInBackground = true
             logStore.isVisible = false
-            guard wantsRunning else { break }
+            // 服务没有运行（或没在启动）时不需要保活
+            guard wantsRunning, isRunning || isBusy else { break }
             server.markActivity()
             // 先申请一小段后台时间，确保有机会启动保活；没开保活时也能多服务约 30 秒
             beginBackgroundTask()
@@ -394,6 +457,11 @@ final class ServerManager: ObservableObject {
         runningSince = nil
         hostResolver.cancel()
         bonjourHost = nil
+        // 服务停止或启动失败时立即停止保活
+        if state != .starting {
+            keepAlive.stop()
+            stopIdleTimer()
+        }
     }
 
     private func serviceRegistered(_ name: String?) {
@@ -431,6 +499,9 @@ final class ServerManager: ObservableObject {
         if old.keepAliveIdleMinutes != settings.keepAliveIdleMinutes && idleTimer != nil {
             startIdleTimer()
         }
+        if old.blockedClients != settings.blockedClients {
+            server.updateBlocklist(Set(settings.blockedClients))
+        }
         applyDeviceSettings()
     }
 
@@ -440,7 +511,7 @@ final class ServerManager: ObservableObject {
             keepAlive.stop()
             stopIdleTimer()
             keepAliveStartsInForeground = false
-        } else if keepAliveStartsInForeground && !isInBackground {
+        } else if keepAliveStartsInForeground && !isInBackground && isRunning {
             keepAlive.start()
         }
     }
@@ -473,13 +544,6 @@ final class ServerManager: ObservableObject {
             stopIdleTimer()
             keepAlive.stop()
         }
-    }
-
-    private static func folderExists(_ relativePath: String) -> Bool {
-        if relativePath.isEmpty { return true }
-        guard let url = PathResolver.resolve(relativePath, in: FileStore.rootURL) else { return false }
-        var isDirectory: ObjCBool = false
-        return FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory) && isDirectory.boolValue
     }
 
     /// 进入后台后向系统申请一小段额外运行时间（通常约 30 秒）

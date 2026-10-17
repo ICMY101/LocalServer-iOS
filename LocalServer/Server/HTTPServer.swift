@@ -10,6 +10,9 @@ struct RequestLog: Identifiable {
     /// 响应体大小
     var bytes: UInt64 = 0
     let client: String
+    /// 请求所属的站点
+    var site: String?
+    var userAgent: String?
 }
 
 /// 基于 Network.framework 的静态文件 HTTP 服务器
@@ -27,6 +30,8 @@ final class HTTPServer {
     var onFilesChanged: (@Sendable () -> Void)?
     /// Bonjour 服务注册成功时回调实际使用的服务名（重名时系统会自动改名），取消注册时为 nil
     var onServiceRegistered: (@Sendable (String?) -> Void)?
+    /// 拦截了被拉黑设备的连接时回调，参数为对方 IP
+    var onBlocked: (@Sendable (String) -> Void)?
 
     /// 网络收发都在这个串行队列上进行
     private let queue = DispatchQueue(label: "LocalServer.http", qos: .userInitiated)
@@ -35,6 +40,8 @@ final class HTTPServer {
     private let router: Router
     private let activityLock = NSLock()
     private var lastActivityDate = Date()
+    /// 已拉黑的 IP，只在 queue 上读写
+    private var blocklist: Set<String> = []
     private var listener: NWListener?
     private var connections: [ObjectIdentifier: HTTPConnection] = [:]
 
@@ -51,6 +58,16 @@ final class HTTPServer {
 
     func updateConfig(_ config: Router.Config) {
         router.config = config
+    }
+
+    /// 更新拉黑名单，并立即断开这些设备现有的连接
+    func updateBlocklist(_ addresses: Set<String>) {
+        queue.async {
+            self.blocklist = addresses
+            for connection in Array(self.connections.values) where addresses.contains(connection.remoteAddress) {
+                connection.close()
+            }
+        }
     }
 
     /// App 内修改了文件时调用，让正在等待的 Live Reload 页面立即刷新
@@ -165,6 +182,13 @@ final class HTTPServer {
     }
 
     private func accept(_ nwConnection: NWConnection) {
+        // 被拉黑的设备在建立连接时就直接断开，不会进入请求处理
+        let address = HTTPConnection.address(of: nwConnection.endpoint)
+        if blocklist.contains(address) {
+            nwConnection.cancel()
+            onBlocked?(address)
+            return
+        }
         let router = self.router
         let workQueue = self.workQueue
         let connection = HTTPConnection(
@@ -187,7 +211,9 @@ final class HTTPServer {
                     path: request.path + (request.rawQuery.isEmpty ? "" : "?" + request.rawQuery),
                     status: response.status,
                     bytes: request.method == "HEAD" ? 0 : response.contentLength,
-                    client: request.remoteAddress
+                    client: request.remoteAddress,
+                    site: response.site,
+                    userAgent: request.header("user-agent")
                 ))
             },
             onClose: { [weak self] connection in

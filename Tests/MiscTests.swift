@@ -16,7 +16,8 @@ final class ServerSettingsTests: XCTestCase {
         XCTAssertTrue(settings.autoExtractZip)
         XCTAssertTrue(settings.bonjour)
         XCTAssertTrue(settings.requirePairing)
-        XCTAssertEqual(settings.siteRoot, "")
+        XCTAssertEqual(settings.disabledSites, [])
+        XCTAssertEqual(settings.blockedClients, [])
         XCTAssertEqual(settings.keepAliveIdleMinutes, 15)
         // 用户原来关闭的后台保活保持关闭
         XCTAssertFalse(settings.backgroundAudio)
@@ -26,10 +27,30 @@ final class ServerSettingsTests: XCTestCase {
         var settings = ServerSettings()
         settings.port = 12345
         settings.requirePairing = false
-        settings.siteRoot = "blog"
+        settings.disabledSites = ["blog"]
+        settings.blockedClients = ["192.168.1.9"]
         settings.liveReload = false
         let decoded = try JSONDecoder().decode(ServerSettings.self, from: JSONEncoder().encode(settings))
         XCTAssertEqual(decoded, settings)
+    }
+
+    func testIgnoresRemovedSiteRootSetting() throws {
+        // 2.0 保存的 siteRoot 在多站点版本中已不再使用，解码时应忽略且不影响其他设置
+        let json = #"{"port":8090,"siteRoot":"blog","requirePairing":false}"#
+        let settings = try JSONDecoder().decode(ServerSettings.self, from: Data(json.utf8))
+        XCTAssertEqual(settings.port, 8090)
+        XCTAssertFalse(settings.requirePairing)
+        XCTAssertTrue(settings.isSiteEnabled("blog"))
+    }
+
+    func testSiteAndBlockHelpers() {
+        var settings = ServerSettings()
+        settings.disabledSites = ["old"]
+        settings.blockedClients = ["10.0.0.8"]
+        XCTAssertFalse(settings.isSiteEnabled("old"))
+        XCTAssertTrue(settings.isSiteEnabled("new"))
+        XCTAssertTrue(settings.isBlocked("10.0.0.8"))
+        XCTAssertFalse(settings.isBlocked("10.0.0.9"))
     }
 
     func testNewInstallDefaults() {
@@ -41,11 +62,11 @@ final class ServerSettingsTests: XCTestCase {
     func testRouterConfigMapping() {
         var settings = ServerSettings()
         settings.requirePairing = false
-        settings.siteRoot = "a/b"
+        settings.disabledSites = ["a", "b"]
         settings.spaFallback = true
         let config = settings.routerConfig
         XCTAssertFalse(config.requirePairing)
-        XCTAssertEqual(config.siteRoot, "a/b")
+        XCTAssertEqual(config.disabledSites, ["a", "b"])
         XCTAssertTrue(config.spaFallback)
     }
 }
@@ -75,6 +96,47 @@ final class RequestLogTests: XCTestCase {
         XCTAssertTrue(store.logs.isEmpty, "后台时不应更新界面数据")
         store.isVisible = true
         XCTAssertEqual(store.logs.map(\.path), ["/b", "/a"])
+    }
+
+    @MainActor
+    func testStatisticsPerClientAndSite() async {
+        let store = RequestLogStore()
+        let chrome = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36"
+        store.append([
+            RequestLog(date: Date(), method: "GET", path: "/blog/", status: 200, bytes: 100, client: "10.0.0.2", site: "blog", userAgent: chrome),
+            RequestLog(date: Date(), method: "GET", path: "/blog/app.css", status: 200, bytes: 50, client: "10.0.0.2", site: "blog", userAgent: chrome),
+            RequestLog(date: Date(), method: "GET", path: "/data.txt", status: 200, bytes: 10, client: "127.0.0.1", site: nil, userAgent: nil),
+        ])
+        XCTAssertEqual(store.totalRequests, 3)
+        XCTAssertEqual(store.totalBytes, 160)
+        XCTAssertEqual(store.activeClients, 2)
+
+        let client = try? XCTUnwrap(store.stats.clients["10.0.0.2"])
+        XCTAssertEqual(client?.requests, 2)
+        XCTAssertEqual(client?.bytes, 150)
+        XCTAssertEqual(client?.deviceName, "Windows · Chrome")
+        XCTAssertEqual(client?.lastPath, "/blog/app.css")
+        XCTAssertTrue(store.stats.clients["127.0.0.1"]?.isLocal == true)
+
+        XCTAssertEqual(store.stats.sites["blog"]?.requests, 2)
+        XCTAssertTrue(store.isActive(site: "blog"))
+        XCTAssertFalse(store.isActive(site: "other"))
+
+        store.recordBlocked("10.0.0.66")
+        store.recordBlocked("10.0.0.66")
+        XCTAssertEqual(store.stats.blockedAttempts["10.0.0.66"], 2)
+    }
+
+    @MainActor
+    func testHiddenStatisticsAreMergedWhenVisible() async {
+        let store = RequestLogStore()
+        store.isVisible = false
+        store.append([log("/a"), log("/b")])
+        store.recordBlocked("10.0.0.5")
+        XCTAssertEqual(store.totalRequests, 0, "后台时不应更新界面数据")
+        store.isVisible = true
+        XCTAssertEqual(store.totalRequests, 2)
+        XCTAssertEqual(store.stats.blockedAttempts["10.0.0.5"], 1)
     }
 
     func testBufferSchedulesOneFlushPerBatch() {

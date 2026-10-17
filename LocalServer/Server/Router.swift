@@ -1,6 +1,10 @@
 import Foundation
 
-/// 把请求分派到静态文件服务、Live Reload 或网页管理接口
+/// 把请求分派到站点、站点列表、Live Reload 或网页管理接口。
+///
+/// www 下的每个一级文件夹都是一个独立站点，通过 `/文件夹名/` 访问，并以该文件夹为根：
+/// 站点页面里以 `/` 开头的资源路径（例如 `/css/app.css`），会根据来源页（Referer）
+/// 或最近访问的站点（Cookie）归属到对应站点，无需修改网页代码。
 final class Router {
     struct Config: Equatable {
         var directoryListing = true
@@ -10,9 +14,23 @@ final class Router {
         var liveReload = true
         /// 电脑端管理页是否需要先用配对码配对
         var requirePairing = true
-        /// 当前网站相对存储根目录的路径，空字符串表示存储根目录本身
-        var siteRoot = ""
+        /// 已关闭的站点，关闭后无法访问
+        var disabledSites: Set<String> = []
     }
+
+    /// 请求最终交给谁处理
+    enum Target: Equatable {
+        /// 访问 `/`：显示所有已开启的站点
+        case portal
+        /// 某个站点内的路径（path 以站点为根）
+        case site(name: String, path: String)
+        /// 站点已关闭
+        case disabled(name: String)
+        /// www 根目录下不属于任何站点的文件
+        case storage(path: String)
+    }
+
+    static let siteCookie = "ls_site"
 
     /// 请求在并发队列上处理，配置可能同时被界面修改，所以读写都加锁
     var config: Config {
@@ -53,18 +71,94 @@ final class Router {
         }
     }
 
-    /// 对外提供服务的网站根目录；设置的文件夹不存在时回退到存储根目录
-    func siteRootURL(for config: Config) -> URL {
-        guard !config.siteRoot.isEmpty,
-              let url = PathResolver.resolve(config.siteRoot, in: storageRoot) else {
-            return storageRoot
-        }
+    // MARK: - 站点
+
+    /// 站点名不能为空，不能以 . 或 __ 开头（`__admin` 等为保留路径）
+    static func isValidSiteName(_ name: String) -> Bool {
+        !name.isEmpty && !name.hasPrefix(".") && !name.hasPrefix("__") && !name.contains("/")
+    }
+
+    /// 站点文件夹；不存在或名称无效时返回 nil
+    func siteURL(_ name: String) -> URL? {
+        guard Self.isValidSiteName(name) else { return nil }
+        let url = storageRoot.appendingPathComponent(name, isDirectory: true)
         var isDirectory: ObjCBool = false
         guard fileManager.fileExists(atPath: url.path, isDirectory: &isDirectory), isDirectory.boolValue else {
-            return storageRoot
+            return nil
         }
         return url
     }
+
+    /// 决定请求由哪个站点处理
+    func resolve(_ request: HTTPRequest, config: Config) -> Target {
+        let path = request.path
+        if path == "/" {
+            return .portal
+        }
+        let segments = path.split(separator: "/").map(String.init)
+        let context = contextSite(of: request, config: config)
+
+        // 1. 来源页属于某个站点，且这个站点里确实有该路径：站点内以 / 开头的资源
+        if let context, segments.first != context, let root = siteURL(context), exists(path, in: root) {
+            return .site(name: context, path: path)
+        }
+        // 2. 路径以站点名开头：/站点名/...
+        if let first = segments.first, siteURL(first) != nil {
+            if config.disabledSites.contains(first) {
+                return .disabled(name: first)
+            }
+            var rest = "/" + segments.dropFirst().joined(separator: "/")
+            if path.hasSuffix("/") && segments.count > 1 {
+                rest += "/"
+            }
+            return .site(name: first, path: rest)
+        }
+        // 3. www 根目录下的散落文件，例如 /favicon.ico
+        if let url = PathResolver.resolve(path, in: storageRoot), isRegularFile(url) {
+            return .storage(path: path)
+        }
+        // 4. 来源站点中不存在的路径，交给站点处理（404 页面或 SPA 回退）
+        if let context {
+            return .site(name: context, path: path)
+        }
+        return .storage(path: path)
+    }
+
+    /// 请求来自哪个站点：优先看来源页（Referer），其次看最近访问的站点（Cookie）
+    private func contextSite(of request: HTTPRequest, config: Config) -> String? {
+        func enabledSite(_ name: String?) -> String? {
+            guard let name, !config.disabledSites.contains(name), siteURL(name) != nil else { return nil }
+            return name
+        }
+        if let referer = request.header("referer"),
+           let url = URL(string: referer),
+           let site = enabledSite(url.path.split(separator: "/").first.map(String.init)) {
+            return site
+        }
+        if let value = cookie(Self.siteCookie, in: request)?.removingPercentEncoding,
+           let site = enabledSite(value) {
+            return site
+        }
+        return nil
+    }
+
+    private func exists(_ path: String, in root: URL) -> Bool {
+        guard let url = PathResolver.resolve(path, in: root) else { return false }
+        return fileManager.fileExists(atPath: url.path)
+    }
+
+    private func cookie(_ name: String, in request: HTTPRequest) -> String? {
+        guard let header = request.header("cookie") else { return nil }
+        for pair in header.split(separator: ";") {
+            let parts = pair.split(separator: "=", maxSplits: 1)
+            if parts.count == 2, parts[0].trimmingCharacters(in: .whitespaces) == name {
+                return parts[1].trimmingCharacters(in: .whitespaces)
+            }
+        }
+        return nil
+    }
+
+    // MARK: - 请求入口
 
     /// 处理请求。大多数请求同步完成；Live Reload 的长轮询会稍后才调用 completion。
     /// 可在任意线程调用，completion 也可能在任意线程被调用。
@@ -83,32 +177,138 @@ final class Router {
 
         if isAdmin {
             finish(config.webAdmin
-                ? admin.handle(request, requirePairing: config.requirePairing, siteRoot: config.siteRoot)
+                ? admin.handle(request, requirePairing: config.requirePairing, disabledSites: config.disabledSites)
                 : .error(404))
-        } else if LiveReload.handles(request.path) {
-            if config.liveReload {
-                liveReload.handle(request, root: siteRootURL(for: config), completion: finish)
-            } else {
+            return
+        }
+        if LiveReload.handles(request.path) {
+            guard config.liveReload else {
                 finish(.error(404))
+                return
             }
-        } else if request.method == "OPTIONS" && config.cors {
+            // 由页面所属的站点决定监视哪个目录
+            let root = contextSite(of: request, config: config).flatMap { siteURL($0) } ?? storageRoot
+            liveReload.handle(request, root: root, completion: finish)
+            return
+        }
+        if request.method == "OPTIONS" && config.cors {
             finish(HTTPResponse(status: 204, headers: [
                 ("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS"),
                 ("Access-Control-Allow-Headers", request.header("access-control-request-headers") ?? "*"),
                 ("Access-Control-Max-Age", "86400"),
             ]))
-        } else {
-            finish(serveStatic(request, root: siteRootURL(for: config), config: config))
+            return
         }
+        guard request.method == "GET" || request.method == "HEAD" else {
+            finish(.error(405, headers: [("Allow", "GET, HEAD")]))
+            return
+        }
+
+        switch resolve(request, config: config) {
+        case .portal:
+            finish(portal(config: config))
+        case .disabled(let name):
+            var response = HTTPResponse.page(
+                status: 403,
+                title: "站点未开启",
+                message: "「\(name)」已在 App 中关闭。在「本地服务器」中开启后即可访问。"
+            )
+            response.site = name
+            finish(response)
+        case .site(let name, let path):
+            guard let root = siteURL(name) else {
+                finish(.error(404))
+                return
+            }
+            var response = serveStatic(request, path: path, root: root, config: config)
+            response.site = name
+            // 记住最近访问的站点，供没有来源信息的 / 开头请求使用
+            if response.status == 200, response.header("Content-Type")?.hasPrefix("text/html") == true {
+                let value = name.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? name
+                response.setHeader("Set-Cookie", "\(Self.siteCookie)=\(value); Path=/; SameSite=Lax")
+            }
+            finish(response)
+        case .storage(let path):
+            finish(serveStatic(request, path: path, root: storageRoot, config: config))
+        }
+    }
+
+    // MARK: - 站点列表
+
+    private func portal(config: Config) -> HTTPResponse {
+        let keys: [URLResourceKey] = [.isDirectoryKey, .contentModificationDateKey]
+        let folders = ((try? fileManager.contentsOfDirectory(
+            at: storageRoot,
+            includingPropertiesForKeys: keys,
+            options: [.skipsHiddenFiles]
+        )) ?? [])
+        .filter { url in
+            let values = try? url.resourceValues(forKeys: Set(keys))
+            let name = url.lastPathComponent
+            return values?.isDirectory == true && Self.isValidSiteName(name) && !config.disabledSites.contains(name)
+        }
+        .sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
+
+        let cards = folders.map { url -> String in
+            let name = url.lastPathComponent
+            let encoded = name.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? name
+            let modified = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
+            let date = modified.map { Self.listingDateFormatter.string(from: $0) } ?? ""
+            let hasIndex = isRegularFile(url.appendingPathComponent("index.html"))
+                || isRegularFile(url.appendingPathComponent("index.htm"))
+            return """
+            <a class="site card" href="/\(encoded.htmlEscaped)/">
+              <span class="kind">\(hasIndex ? "网站" : "文件夹")</span>
+              <span class="name">\(name.htmlEscaped)</span>
+              <span class="path">/\(name.htmlEscaped)/</span>
+              <span class="meta">更新于 \(date)</span>
+              <span class="go">访问 ›</span>
+            </a>
+            """
+        }.joined()
+
+        let content: String
+        if folders.isEmpty {
+            content = """
+            <div class="empty card"><h2>还没有开启的站点</h2>
+            <p>在「本地服务器」App 的 www 文件夹中，每个文件夹都是一个独立站点，可以通过 /文件夹名/ 访问。</p></div>
+            """
+        } else {
+            content = "<div class=\"sites\">\(cards)</div>"
+        }
+        let adminLink = config.webAdmin ? "<a href=\"/__admin/\">在电脑上管理文件</a> · " : ""
+        let body = """
+        <main>
+          <p class="eyebrow">本地服务器</p>
+          <h1>站点</h1>
+          <p class="lead">\(folders.count) 个站点正在运行。每个站点都以自己的文件夹为根目录。</p>
+          \(content)
+          <p class="foot">\(adminLink)由 iPhone 上的「本地服务器」提供</p>
+        </main>
+        """
+        let css = """
+        .sites{display:grid;grid-template-columns:repeat(auto-fill,minmax(270px,1fr));gap:20px}
+        .site{display:flex;flex-direction:column;padding:30px 28px 26px;color:var(--fg);min-height:210px;transition:transform .25s ease,box-shadow .25s ease}
+        .site:hover{text-decoration:none;transform:scale(1.015);box-shadow:0 4px 24px rgba(0,0,0,.08)}
+        .site .kind{font-size:13px;font-weight:600;color:var(--muted)}
+        .site .name{font-size:28px;font-weight:700;letter-spacing:-.02em;margin-top:6px;word-break:break-all}
+        .site .path{font-size:15px;color:var(--muted);margin-top:4px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+        .site .meta{font-size:13px;color:var(--muted);margin-top:auto;padding-top:22px}
+        .site .go{font-size:17px;color:var(--accent);margin-top:6px}
+        .empty{padding:40px 32px}
+        .empty h2{margin:0 0 8px;font-size:24px}
+        .empty p{margin:0;color:var(--muted)}
+        """
+        var response = HTTPResponse.html(WebStyle.page(title: "站点 · 本地服务器", body: body, extraCSS: css))
+        response.setHeader("Cache-Control", "no-store")
+        return response
     }
 
     // MARK: - 静态文件
 
-    private func serveStatic(_ request: HTTPRequest, root: URL, config: Config) -> HTTPResponse {
-        guard request.method == "GET" || request.method == "HEAD" else {
-            return .error(405, headers: [("Allow", "GET, HEAD")])
-        }
-        guard let url = PathResolver.resolve(request.path, in: root) else {
+    /// path 是相对 root 的路径；目录重定向使用原始请求路径，保证浏览器地址正确
+    private func serveStatic(_ request: HTTPRequest, path: String, root: URL, config: Config) -> HTTPResponse {
+        guard let url = PathResolver.resolve(path, in: root) else {
             return .error(403, "不允许访问该路径")
         }
 
@@ -130,7 +330,7 @@ final class Router {
             if config.directoryListing {
                 return directoryListing(url, for: request)
             }
-            return .error(403, "该目录没有 index.html，且目录列表已关闭")
+            return .error(403, "该文件夹中没有 index.html，且目录列表已关闭。")
         }
 
         if config.spaFallback, request.header("accept")?.contains("text/html") == true {
@@ -143,7 +343,7 @@ final class Router {
         if isRegularFile(notFoundPage) {
             return serveFile(notFoundPage, for: request, status: 404, injectLiveReload: config.liveReload)
         }
-        return .error(404, request.path)
+        return .error(404, "没有找到 \(request.path)")
     }
 
     private func isRegularFile(_ url: URL) -> Bool {
@@ -223,46 +423,40 @@ final class Router {
             return $0.name.localizedStandardCompare($1.name) == .orderedAscending
         }
 
-        var rows = ""
-        if request.path != "/" {
-            rows += "<tr><td><a href=\"../\">📁 ../</a></td><td></td><td></td></tr>"
-        }
+        var rows = "<a class=\"row\" href=\"../\"><span class=\"n\">上一级</span><span></span><span></span></a>"
         for entry in entries {
             let encoded = (entry.name.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? entry.name)
                 + (entry.isDirectory ? "/" : "")
-            let icon = entry.isDirectory ? "📁" : "📄"
             let display = entry.name + (entry.isDirectory ? "/" : "")
-            let size = entry.isDirectory ? "—" : Self.sizeFormatter.string(fromByteCount: Int64(entry.size))
-            let date = entry.modified.map(Self.listingDateFormatter.string(from:)) ?? ""
-            rows += "<tr><td><a href=\"\(encoded.htmlEscaped)\">\(icon) \(display.htmlEscaped)</a></td>"
-                + "<td class=\"r\">\(size)</td><td class=\"r\">\(date)</td></tr>"
+            let size = entry.isDirectory ? "" : Self.sizeFormatter.string(fromByteCount: Int64(entry.size))
+            let date = entry.modified.map { Self.listingDateFormatter.string(from: $0) } ?? ""
+            rows += "<a class=\"row\" href=\"\(encoded.htmlEscaped)\"><span class=\"n\">\(display.htmlEscaped)</span>"
+                + "<span class=\"m\">\(size)</span><span class=\"m d\">\(date)</span></a>"
         }
         if entries.isEmpty {
-            rows += "<tr><td colspan=\"3\" class=\"empty\">空文件夹</td></tr>"
+            rows += "<div class=\"row empty\">空文件夹</div>"
         }
 
-        let title = "Index of \(request.path)".htmlEscaped
-        return .html("""
-        <!doctype html>
-        <html lang="zh-CN"><head><meta charset="utf-8">
-        <meta name="viewport" content="width=device-width,initial-scale=1">
-        <title>\(title)</title>
-        <style>
-        :root{color-scheme:light dark;--fg:#1d1d1f;--muted:#86868b;--line:#e5e5ea;--bg:#fff;--link:#0a66d8}
-        @media(prefers-color-scheme:dark){:root{--fg:#f5f5f7;--muted:#98989d;--line:#38383a;--bg:#000;--link:#4ea1ff}}
-        body{font-family:-apple-system,system-ui,sans-serif;margin:0;padding:24px 16px;background:var(--bg);color:var(--fg)}
-        h1{font-size:20px;font-weight:600;margin:0 0 16px;word-break:break-all}
-        table{width:100%;border-collapse:collapse;font-size:15px}
-        td{padding:10px 8px;border-bottom:1px solid var(--line)}
-        td.r{color:var(--muted);text-align:right;white-space:nowrap;font-size:13px}
-        a{color:var(--link);text-decoration:none;word-break:break-all}
-        .empty{color:var(--muted);text-align:center}
-        @media(max-width:520px){td.r:last-child{display:none}}
-        </style></head><body>
-        <h1>\(title)</h1>
-        <table>\(rows)</table>
-        </body></html>
-        """)
+        let body = """
+        <main>
+          <p class="eyebrow">目录</p>
+          <h1 class="path">\(request.path.htmlEscaped)</h1>
+          <div class="list card">\(rows)</div>
+          <p class="foot"><a href="/">所有站点</a></p>
+        </main>
+        """
+        let css = """
+        h1.path{font-size:34px;word-break:break-all}
+        .list{padding:6px 0;margin-top:28px}
+        .row{display:grid;grid-template-columns:1fr 90px 140px;gap:12px;padding:13px 24px;color:var(--fg);border-top:1px solid var(--line);font-size:17px}
+        .row:first-child{border-top:0}
+        .row:hover{text-decoration:none;background:var(--bg)}
+        .row .n{word-break:break-all;color:var(--accent)}
+        .row .m{color:var(--muted);font-size:14px;text-align:right;align-self:center}
+        .empty{color:var(--muted)}
+        @media(max-width:600px){.row{grid-template-columns:1fr 80px}.row .d{display:none}}
+        """
+        return .html(WebStyle.page(title: request.path, body: body, extraCSS: css))
     }
 }
 
