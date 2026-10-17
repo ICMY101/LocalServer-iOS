@@ -4,18 +4,27 @@ options:
   bundleIdPrefix: com.localserver
   deploymentTarget:
     iOS: "16.0"
+packages:
+  ZIPFoundation:
+    url: https://github.com/weichsel/ZIPFoundation
+    from: "0.9.19"
 targets:
   LocalServer:
     type: application
     platform: iOS
     sources:
       - path: LocalServer
-    scheme: {}
+    dependencies:
+      - package: ZIPFoundation
+    scheme:
+      testTargets:
+        - LocalServerTests
     settings:
       base:
         PRODUCT_NAME: LocalServer
         PRODUCT_BUNDLE_IDENTIFIER: com.localserver.app
-        MARKETING_VERSION: "1.0"
+        # 发布版本号；构建号（CURRENT_PROJECT_VERSION）由 CI 自动设置为运行次数
+        MARKETING_VERSION: "1.1"
         CURRENT_PROJECT_VERSION: "1"
         INFOPLIST_FILE: Info.plist
         GENERATE_INFOPLIST_FILE: NO
@@ -24,3 +33,15 @@ targets:
         TARGETED_DEVICE_FAMILY: "1,2"
         SWIFT_VERSION: "5.0"
         ENABLE_PREVIEWS: YES
+  LocalServerTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: Tests
+    dependencies:
+      - target: LocalServer
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.localserver.app.tests
+        GENERATE_INFOPLIST_FILE: YES
+        SWIFT_VERSION: "5.0"

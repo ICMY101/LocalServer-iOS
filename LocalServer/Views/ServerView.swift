@@ -101,8 +101,10 @@ struct ServerView: View {
     private var statusDetail: String? {
         switch server.state {
         case .failed(let message): return message
-        case .running: return server.settings.allowLAN ? "本机和同一局域网的设备都可以访问" : "仅本机可访问（可在设置中开启局域网访问）"
-        case .stopped: return "网站根目录：文件 › www"
+        case .running:
+            let scope = server.settings.allowLAN ? "本机和同一局域网的设备都可以访问" : "仅本机可访问（可在设置中开启局域网访问）"
+            return scope + "\n网站目录：" + server.siteRootDisplay
+        case .stopped: return "网站目录：" + server.siteRootDisplay
         case .starting: return nil
         }
     }
@@ -117,6 +119,15 @@ struct ServerView: View {
                     AddressRow(
                         label: address.label,
                         url: server.lanURL(for: address),
+                        showQR: true,
+                        open: openInBrowser,
+                        qr: { qrTarget = QRTarget(url: $0, title: "扫码访问网站") }
+                    )
+                }
+                if let url = server.bonjourURL {
+                    AddressRow(
+                        label: "固定地址（Bonjour，IP 变化后仍可用）",
+                        url: url,
                         showQR: true,
                         open: openInBrowser,
                         qr: { qrTarget = QRTarget(url: $0, title: "扫码访问网站") }
@@ -148,7 +159,11 @@ struct ServerView: View {
         } header: {
             Text("从电脑上传文件")
         } footer: {
-            Text("在同一 Wi-Fi 下的电脑浏览器中打开此地址，可以拖拽上传文件或整个文件夹。")
+            if server.settings.adminPassword.isEmpty {
+                Text("在同一 Wi-Fi 下的电脑浏览器中打开此地址，可以拖拽上传文件、文件夹或 zip。⚠️ 未设置访问密码，可在“设置 › 上传”中设置。")
+            } else {
+                Text("在同一 Wi-Fi 下的电脑浏览器中打开此地址，可以拖拽上传文件、文件夹或 zip。访问密码：\(server.settings.adminPassword)")
+            }
         }
     }
 

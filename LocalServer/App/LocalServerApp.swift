@@ -17,7 +17,34 @@ struct LocalServerApp: App {
 }
 
 struct ContentView: View {
+    @EnvironmentObject private var server: ServerManager
+    @State private var importMessage: String?
+
     var body: some View {
+        tabs
+            // 在微信等 App 中选择“用其他应用打开 › 本地服务器”时触发
+            .onOpenURL { url in
+                server.receive(url)
+            }
+            .sheet(isPresented: Binding(
+                get: { !server.incomingURLs.isEmpty },
+                set: { if !$0 { server.discardIncoming() } }
+            ), onDismiss: {
+                importMessage = server.takeImportMessage()
+            }) {
+                IncomingFilesSheet()
+            }
+            .alert("导入完成", isPresented: Binding(
+                get: { importMessage != nil },
+                set: { if !$0 { importMessage = nil } }
+            )) {
+                Button("好", role: .cancel) {}
+            } message: {
+                Text(importMessage ?? "")
+            }
+    }
+
+    private var tabs: some View {
         TabView {
             ServerView()
                 .tabItem { Label("服务器", systemImage: "server.rack") }

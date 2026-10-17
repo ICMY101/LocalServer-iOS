@@ -41,6 +41,9 @@ td.a{width:1%;white-space:nowrap;text-align:right}
 #progress .track{height:6px;background:var(--line);border-radius:3px;overflow:hidden}
 #progress .fill{height:100%;width:0;background:var(--accent);transition:width .1s}
 #progress .label{font-size:13px;color:var(--muted);margin-top:6px;word-break:break-all}
+.opt{display:block;margin-top:14px;font-size:13px;color:var(--muted);cursor:pointer}
+button.small{padding:3px 10px;font-size:12px;margin-left:6px}
+.tag{font-size:11px;color:#fff;background:var(--accent);border-radius:4px;padding:1px 5px;margin-left:6px;vertical-align:1px}
 #toast{position:fixed;left:50%;bottom:24px;transform:translateX(-50%);background:rgba(0,0,0,.8);color:#fff;padding:10px 16px;border-radius:10px;font-size:14px;display:none;max-width:90%}
 @media(max-width:560px){td.m.d{display:none}}
 </style>
@@ -48,7 +51,8 @@ td.a{width:1%;white-space:nowrap;text-align:right}
 <body>
 <main>
   <h1>文件管理</h1>
-  <p class="sub">上传的文件会保存到 iPhone 上的网站根目录，<a href="/" target="_blank" style="color:var(--accent)">打开网站首页 ↗</a></p>
+  <p class="sub">上传的文件保存在 iPhone 的 www 文件夹中。<a href="/" target="_blank" style="color:var(--accent)">打开网站首页 ↗</a>
+    <button class="ghost small" id="logout" style="display:none" onclick="logout()">退出登录</button></p>
 
   <div class="card">
     <div id="drop">
@@ -57,6 +61,7 @@ td.a{width:1%;white-space:nowrap;text-align:right}
         <button onclick="pick.click()">选择文件</button>
         <button class="ghost" onclick="pickDir.click()">选择文件夹</button>
       </div>
+      <label class="opt"><input type="checkbox" id="unzip"> 上传 .zip 时自动解压到当前目录</label>
       <div id="progress"><div class="track"><div class="fill"></div></div><div class="label"></div></div>
     </div>
     <input id="pick" type="file" multiple hidden>
@@ -78,6 +83,10 @@ const API = '/__admin/api/';
 const GUARD = {'X-LocalServer': '1'};
 let cwd = decodeURIComponent(location.hash.slice(1)) || '/';
 let busy = false;
+let siteRoot = '/';
+const unzipBox = document.getElementById('unzip');
+try { unzipBox.checked = localStorage.getItem('ls-unzip') !== '0'; } catch (_) { unzipBox.checked = true; }
+unzipBox.onchange = () => { try { localStorage.setItem('ls-unzip', unzipBox.checked ? '1' : '0'); } catch (_) {} };
 
 const $ = s => document.querySelector(s);
 const esc = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -104,6 +113,7 @@ async function api(method, name, params) {
   const qs = new URLSearchParams(params).toString();
   const r = await fetch(API + name + '?' + qs, {method, headers: GUARD});
   const j = await r.json().catch(() => ({}));
+  if (r.status === 401) { location.reload(); throw new Error('需要登录'); }
   if (!r.ok) throw new Error(j.error || r.statusText);
   return j;
 }
@@ -120,22 +130,35 @@ async function load() {
   try { data = await api('GET', 'list', {path: cwd}); }
   catch (e) { if (cwd !== '/') { cwd = '/'; return load(); } $('#list').innerHTML = '<tr><td class="empty">' + esc(e.message) + '</td></tr>'; return; }
 
+  siteRoot = data.siteRoot || '/';
+  $('#logout').style.display = data.protected ? 'inline-block' : 'none';
   if (!data.items.length) { $('#list').innerHTML = '<tr><td class="empty">空文件夹，拖入文件即可上传</td></tr>'; return; }
   $('#list').innerHTML = data.items.map((it, i) => `
     <tr>
-      <td class="n"><a data-i="${i}">${it.dir ? '📁' : '📄'} ${esc(it.name)}</a></td>
+      <td class="n"><a data-i="${i}">${it.dir ? '📁' : '📄'} ${esc(it.name)}</a>${it.dir && join(cwd, it.name) === siteRoot ? '<span class="tag">当前网站</span>' : ''}</td>
       <td class="m">${it.dir ? '' : fmtSize(it.size)}</td>
       <td class="m d">${fmtDate(it.mtime)}</td>
       <td class="a"><button class="danger" data-r="${i}" title="重命名">✎</button><button class="danger" data-d="${i}" title="删除">✕</button></td>
     </tr>`).join('');
   $('#list').querySelectorAll('a[data-i]').forEach(a => a.onclick = () => {
     const it = data.items[a.dataset.i], p = join(cwd, it.name);
-    it.dir ? go(p) : window.open(encPath(p), '_blank');
+    if (it.dir) return go(p);
+    const url = webURL(p);
+    url ? window.open(url, '_blank') : toast('该文件不在当前网站目录（' + siteRoot + '）中，无法通过网址访问');
   });
   $('#list').querySelectorAll('button[data-d]').forEach(b => b.onclick = () => remove(data.items[b.dataset.d]));
   $('#list').querySelectorAll('button[data-r]').forEach(b => b.onclick = () => rename(data.items[b.dataset.r]));
 }
 function go(p) { cwd = p; load(); }
+function webURL(p) {
+  if (siteRoot === '/') return encPath(p);
+  if (p.startsWith(siteRoot + '/')) return encPath(p.slice(siteRoot.length));
+  return null;
+}
+async function logout() {
+  try { await api('POST', 'logout', {}); } catch (_) {}
+  location.reload();
+}
 
 async function mkdir() {
   const name = prompt('文件夹名称');
@@ -155,10 +178,12 @@ async function rename(it) {
 function putFile(file, path, onProgress) {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
-    xhr.open('PUT', API + 'file?path=' + encodeURIComponent(path));
+    const extract = unzipBox.checked && /\.zip$/i.test(path) ? '&extract=1' : '';
+    xhr.open('PUT', API + 'file?path=' + encodeURIComponent(path) + extract);
     xhr.setRequestHeader('X-LocalServer', '1');
     xhr.upload.onprogress = e => e.lengthComputable && onProgress(e.loaded);
     xhr.onload = () => {
+      if (xhr.status === 401) { location.reload(); return reject(new Error('需要登录')); }
       if (xhr.status < 300) return resolve();
       let msg = xhr.statusText;
       try { msg = JSON.parse(xhr.responseText).error || msg; } catch (_) {}
@@ -227,6 +252,57 @@ $('#pick').onchange = e => { uploadAll([...e.target.files].map(f => ({file: f, p
 $('#pickDir').onchange = e => { uploadAll([...e.target.files].map(f => ({file: f, path: f.webkitRelativePath || f.name}))); e.target.value = ''; };
 
 load();
+</script>
+</body>
+</html>
+"""#
+
+    /// 设置了访问密码、且浏览器尚未登录时显示
+    static let loginHTML = #"""
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>登录 · 本地服务器</title>
+<style>
+:root{color-scheme:light dark;--bg:#f5f5f7;--card:#fff;--fg:#1d1d1f;--muted:#86868b;--line:#d2d2d7;--accent:#0a66d8;--danger:#d70015}
+@media(prefers-color-scheme:dark){:root{--bg:#000;--card:#1c1c1e;--fg:#f5f5f7;--muted:#98989d;--line:#38383a;--accent:#4ea1ff;--danger:#ff6961}}
+*{box-sizing:border-box}
+body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:16px;font-family:-apple-system,system-ui,"PingFang SC","Microsoft YaHei",sans-serif;background:var(--bg);color:var(--fg)}
+form{width:100%;max-width:340px;background:var(--card);border-radius:16px;padding:28px 24px;box-shadow:0 1px 3px rgba(0,0,0,.08)}
+h1{font-size:20px;margin:0 0 6px}
+p{color:var(--muted);font-size:14px;margin:0 0 20px}
+input{width:100%;font:inherit;font-size:16px;padding:11px 12px;border:1px solid var(--line);border-radius:10px;background:transparent;color:var(--fg);letter-spacing:2px}
+input:focus{outline:2px solid var(--accent);border-color:transparent}
+button{width:100%;margin-top:14px;font:inherit;font-size:15px;border:0;border-radius:10px;padding:11px;background:var(--accent);color:#fff;cursor:pointer}
+button:disabled{opacity:.5}
+#err{color:var(--danger);font-size:13px;min-height:18px;margin-top:10px}
+</style>
+</head>
+<body>
+<form id="f">
+  <h1>🔒 输入访问密码</h1>
+  <p>访问密码在 iPhone「本地服务器」App 的“设置 › 上传”中查看。</p>
+  <input id="pw" type="password" autocomplete="current-password" inputmode="text" autofocus required>
+  <button id="go">进入文件管理</button>
+  <div id="err"></div>
+</form>
+<script>
+document.getElementById('f').onsubmit = async e => {
+  e.preventDefault();
+  const btn = document.getElementById('go'), err = document.getElementById('err');
+  btn.disabled = true; err.textContent = '';
+  try {
+    const r = await fetch('/__admin/api/login', {method: 'POST', headers: {'X-LocalServer': '1'}, body: document.getElementById('pw').value});
+    const j = await r.json().catch(() => ({}));
+    if (r.ok) { location.reload(); return; }
+    err.textContent = j.error || ('登录失败（' + r.status + '）');
+  } catch (_) {
+    err.textContent = '无法连接，请确认手机上的 App 正在运行';
+  }
+  btn.disabled = false;
+};
 </script>
 </body>
 </html>

@@ -1,26 +1,45 @@
 import Foundation
 
-/// 把请求分派到静态文件服务或网页管理接口
+/// 把请求分派到静态文件服务、Live Reload 或网页管理接口
 final class Router {
     struct Config: Equatable {
         var directoryListing = true
         var spaFallback = false
         var webAdmin = true
         var cors = false
+        var liveReload = true
+        var adminPassword = ""
+        /// 当前网站相对存储根目录的路径，空字符串表示存储根目录本身
+        var siteRoot = ""
     }
 
     var config: Config
     var onFilesChanged: (() -> Void)?
 
-    let root: URL
+    /// 存储根目录（www），网页管理在这里操作
+    let storageRoot: URL
     private let fileManager = FileManager.default
-    private lazy var admin = AdminAPI(root: root) { [weak self] in
+    private let liveReload = LiveReload()
+    private lazy var admin = AdminAPI(root: storageRoot) { [weak self] in
         self?.onFilesChanged?()
     }
 
     init(rootURL: URL, config: Config) {
-        self.root = rootURL
+        self.storageRoot = rootURL
         self.config = config
+    }
+
+    /// 对外提供服务的网站根目录；设置的文件夹不存在时回退到存储根目录
+    var siteRootURL: URL {
+        guard !config.siteRoot.isEmpty,
+              let url = PathResolver.resolve(config.siteRoot, in: storageRoot) else {
+            return storageRoot
+        }
+        var isDirectory: ObjCBool = false
+        guard fileManager.fileExists(atPath: url.path, isDirectory: &isDirectory), isDirectory.boolValue else {
+            return storageRoot
+        }
+        return url
     }
 
     func handle(_ request: HTTPRequest) -> HTTPResponse {
@@ -28,7 +47,11 @@ final class Router {
         var response: HTTPResponse
 
         if isAdmin {
-            response = config.webAdmin ? admin.handle(request) : .error(404)
+            response = config.webAdmin
+                ? admin.handle(request, password: config.adminPassword, siteRoot: config.siteRoot)
+                : .error(404)
+        } else if LiveReload.handles(request.path) {
+            response = config.liveReload ? liveReload.handle(request, root: siteRootURL) : .error(404)
         } else if request.method == "OPTIONS" && config.cors {
             response = HTTPResponse(status: 204, headers: [
                 ("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS"),
@@ -36,7 +59,7 @@ final class Router {
                 ("Access-Control-Max-Age", "86400"),
             ])
         } else {
-            response = serveStatic(request)
+            response = serveStatic(request, root: siteRootURL)
         }
 
         response.setHeader("Server", "LocalServer-iOS")
@@ -49,7 +72,7 @@ final class Router {
 
     // MARK: - 静态文件
 
-    private func serveStatic(_ request: HTTPRequest) -> HTTPResponse {
+    private func serveStatic(_ request: HTTPRequest, root: URL) -> HTTPResponse {
         guard request.method == "GET" || request.method == "HEAD" else {
             return .error(405, headers: [("Allow", "GET, HEAD")])
         }
@@ -102,15 +125,20 @@ final class Router {
         }
         let size = (attributes[.size] as? NSNumber)?.uint64Value ?? 0
         let modified = (attributes[.modificationDate] as? Date) ?? Date()
-        let etag = "\"\(String(size, radix: 16))-\(String(Int64(modified.timeIntervalSince1970 * 1000), radix: 16))\""
+        let contentType = MIMEType.forExtension(url.pathExtension)
+        // 开启 Live Reload 时，在 HTML 中插入自动刷新脚本
+        let inject = config.liveReload && contentType.hasPrefix("text/html") && size <= LiveReload.maxInjectSize
+
+        let etagCore = "\(String(size, radix: 16))-\(String(Int64(modified.timeIntervalSince1970 * 1000), radix: 16))"
+        let etag = "\"\(etagCore)\(inject ? "-lr" : "")\""
 
         var headers: [(String, String)] = [
-            ("Content-Type", MIMEType.forExtension(url.pathExtension)),
+            ("Content-Type", contentType),
             ("Last-Modified", HTTPDate.string(from: modified)),
             ("ETag", etag),
             // 每次都向服务器验证，修改文件后刷新即可看到最新内容
             ("Cache-Control", "no-cache"),
-            ("Accept-Ranges", "bytes"),
+            ("Accept-Ranges", inject ? "none" : "bytes"),
         ]
 
         if status == 200 {
@@ -124,7 +152,7 @@ final class Router {
                 return HTTPResponse(status: 304, headers: headers)
             }
 
-            if let range = request.header("range") {
+            if !inject, let range = request.header("range") {
                 switch ByteRange.parse(range, size: size) {
                 case .full:
                     break
@@ -137,6 +165,12 @@ final class Router {
             }
         }
 
+        if inject {
+            guard let data = try? Data(contentsOf: url) else {
+                return .error(500, "无法读取文件")
+            }
+            return HTTPResponse(status: status, headers: headers, body: .data(LiveReload.inject(into: data)))
+        }
         return HTTPResponse(status: status, headers: headers, body: .file(url, offset: 0, length: size))
     }
 
@@ -225,7 +259,7 @@ enum PathResolver {
 
 // MARK: - Range 请求
 
-enum ByteRange {
+enum ByteRange: Equatable {
     case full
     case partial(offset: UInt64, length: UInt64)
     case unsatisfiable

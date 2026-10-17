@@ -23,6 +23,8 @@ final class HTTPServer {
     var onStateChange: (@Sendable (State) -> Void)?
     var onRequest: (@Sendable (RequestLog) -> Void)?
     var onFilesChanged: (@Sendable () -> Void)?
+    /// Bonjour 服务注册成功时回调实际使用的服务名（重名时系统会自动改名），取消注册时为 nil
+    var onServiceRegistered: (@Sendable (String?) -> Void)?
 
     private let queue = DispatchQueue(label: "LocalServer.http")
     private let router: Router
@@ -42,9 +44,9 @@ final class HTTPServer {
         }
     }
 
-    func start(port: UInt16, localOnly: Bool) {
+    func start(port: UInt16, localOnly: Bool, bonjourName: String? = nil) {
         queue.async {
-            self.startOnQueue(port: port, localOnly: localOnly)
+            self.startOnQueue(port: port, localOnly: localOnly, bonjourName: bonjourName)
         }
     }
 
@@ -57,7 +59,7 @@ final class HTTPServer {
 
     // MARK: - 私有
 
-    private func startOnQueue(port: UInt16, localOnly: Bool) {
+    private func startOnQueue(port: UInt16, localOnly: Bool, bonjourName: String?) {
         stopOnQueue()
         guard port > 0, let nwPort = NWEndpoint.Port(rawValue: port) else {
             emit(.failed("无效的端口号"))
@@ -95,6 +97,23 @@ final class HTTPServer {
                 break
             }
         }
+        if let bonjourName, !localOnly {
+            listener.service = NWListener.Service(name: bonjourName, type: "_http._tcp")
+            listener.serviceRegistrationUpdateHandler = { [weak self, weak listener] change in
+                // 忽略已被替换的旧 listener 迟到的回调
+                guard let self, let listener, listener === self.listener else { return }
+                switch change {
+                case .add(let endpoint):
+                    if case let .service(name, _, _, _) = endpoint {
+                        self.onServiceRegistered?(name)
+                    }
+                case .remove:
+                    self.onServiceRegistered?(nil)
+                @unknown default:
+                    break
+                }
+            }
+        }
         listener.newConnectionHandler = { [weak self] connection in
             self?.accept(connection)
         }
@@ -108,6 +127,9 @@ final class HTTPServer {
         let current = listener
         listener = nil
         current?.cancel()
+        if current?.service != nil {
+            onServiceRegistered?(nil)
+        }
         for connection in Array(connections.values) {
             connection.close()
         }
@@ -121,6 +143,8 @@ final class HTTPServer {
             queue: queue,
             handler: { request in router.handle(request) },
             onResponse: { [weak self] request, response in
+                // Live Reload 每秒轮询一次，不记录到日志里
+                guard !LiveReload.handles(request.path) else { return }
                 self?.onRequest?(RequestLog(
                     date: Date(),
                     method: request.method,

@@ -16,6 +16,7 @@ struct FileBrowserView: View {
     @State private var browserTarget: BrowserTarget?
     @State private var editingItem: FileItem?
     @State private var message: String?
+    @State private var isWorking = false
 
     private enum NameAction {
         case newFolder
@@ -57,6 +58,14 @@ struct FileBrowserView: View {
                 .padding()
             }
         }
+        .overlay {
+            if isWorking {
+                ProgressView("正在处理…")
+                    .padding(20)
+                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14))
+            }
+        }
+        .disabled(isWorking)
         .navigationTitle(isRoot ? "网站文件" : directory.lastPathComponent)
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
@@ -65,7 +74,7 @@ struct FileBrowserView: View {
             if isRoot {
                 ToolbarItem(placement: .navigationBarLeading) {
                     Button {
-                        preview(url: FileStore.rootURL, isDirectory: true)
+                        preview(url: server.siteRootURL, isDirectory: true)
                     } label: {
                         Label("预览网站", systemImage: "play.circle")
                     }
@@ -130,13 +139,13 @@ struct FileBrowserView: View {
         Group {
             if item.isDirectory {
                 NavigationLink(value: item.url) {
-                    FileRow(item: item)
+                    FileRow(item: item, isSiteRoot: server.isSiteRoot(item.url))
                 }
             } else {
                 Button {
                     open(item)
                 } label: {
-                    FileRow(item: item)
+                    FileRow(item: item, isSiteRoot: false)
                 }
                 .foregroundColor(.primary)
             }
@@ -168,10 +177,34 @@ struct FileBrowserView: View {
                     Label("编辑", systemImage: "square.and.pencil")
                 }
             }
-            Button {
-                UIPasteboard.general.string = server.previewURL(for: item.url).absoluteString
-            } label: {
-                Label("复制链接", systemImage: "link")
+            if item.isZip {
+                Button {
+                    extract(item)
+                } label: {
+                    Label("解压到此处", systemImage: "archivebox")
+                }
+            }
+            if item.isDirectory {
+                if server.isSiteRoot(item.url) {
+                    Button {
+                        server.setSiteRoot(nil)
+                    } label: {
+                        Label("恢复以 www 为网站根目录", systemImage: "arrow.uturn.backward")
+                    }
+                } else {
+                    Button {
+                        server.setSiteRoot(item.url)
+                    } label: {
+                        Label("设为网站根目录", systemImage: "globe")
+                    }
+                }
+            }
+            if let link = server.previewURL(for: item.url) {
+                Button {
+                    UIPasteboard.general.string = link.absoluteString
+                } label: {
+                    Label("复制链接", systemImage: "link")
+                }
             }
             if !item.isDirectory {
                 ShareLink(item: item.url) {
@@ -239,32 +272,69 @@ struct FileBrowserView: View {
     }
 
     private func preview(url: URL, isDirectory: Bool) {
-        if server.isRunning {
-            var target = server.previewURL(for: url)
+        if server.isRunning, var target = server.previewURL(for: url) {
             if isDirectory && !target.absoluteString.hasSuffix("/") {
                 target = URL(string: target.absoluteString + "/") ?? target
             }
             browserTarget = BrowserTarget(url: target)
-        } else {
-            var fileURL = url
-            if isDirectory {
-                fileURL = url.appendingPathComponent("index.html")
-                guard FileManager.default.fileExists(atPath: fileURL.path) else {
-                    message = "服务器未运行，且该文件夹中没有 index.html。请先在“服务器”页启动服务。"
-                    return
-                }
-            }
-            browserTarget = BrowserTarget(url: fileURL, readAccessURL: FileStore.rootURL)
+            return
         }
+        // 服务器未运行，或文件不在当前网站目录内：直接以本地文件方式打开
+        var fileURL = url
+        if isDirectory {
+            fileURL = url.appendingPathComponent("index.html")
+            guard FileManager.default.fileExists(atPath: fileURL.path) else {
+                message = server.isRunning
+                    ? "该文件夹不在当前网站（\(server.siteRootDisplay)）中，且没有 index.html。"
+                    : "服务器未运行，且该文件夹中没有 index.html。请先在“服务器”页启动服务。"
+                return
+            }
+        }
+        browserTarget = BrowserTarget(url: fileURL, readAccessURL: FileStore.rootURL)
     }
 
     private func handleImport(_ result: Result<[URL], Error>) {
         switch result {
         case .success(let urls):
             guard !urls.isEmpty else { return }
-            perform { _ = try FileStore.importItems(urls, into: directory) }
+            let directory = directory
+            let extractZips = server.settings.autoExtractZip
+            runInBackground {
+                let summary = FileStore.importItems(urls, into: directory, extractZips: extractZips)
+                // 普通导入成功时不打扰，解压或失败时才提示
+                return summary.failures.isEmpty && summary.extractedFiles == 0 ? nil : summary.message
+            }
         case .failure(let error):
             message = error.localizedDescription
+        }
+    }
+
+    private func extract(_ item: FileItem) {
+        runInBackground {
+            do {
+                let result = try FileStore.extractZip(item)
+                var text = "已解压 \(result.files) 个文件"
+                if result.skipped > 0 {
+                    text += "，跳过 \(result.skipped) 项（隐藏文件、符号链接或不安全的路径）"
+                }
+                return text
+            } catch {
+                return error.localizedDescription
+            }
+        }
+    }
+
+    /// 在后台线程执行耗时的文件操作（导入、解压），完成后刷新列表并显示结果
+    private func runInBackground(_ work: @escaping @Sendable () -> String?) {
+        isWorking = true
+        Task {
+            let result = await Task.detached(operation: work).value
+            isWorking = false
+            if let result {
+                message = result
+            }
+            reload()
+            server.notifyFilesChanged()
         }
     }
 
@@ -294,11 +364,13 @@ struct FileBrowserView: View {
             message = error.localizedDescription
         }
         reload()
+        server.notifyFilesChanged()
     }
 }
 
 private struct FileRow: View {
     let item: FileItem
+    let isSiteRoot: Bool
 
     private static let sizeFormatter: ByteCountFormatter = {
         let formatter = ByteCountFormatter()
@@ -313,8 +385,18 @@ private struct FileRow: View {
                 .foregroundColor(item.isDirectory ? Color.accentColor : Color.secondary)
                 .frame(width: 28)
             VStack(alignment: .leading, spacing: 2) {
-                Text(item.name)
-                    .lineLimit(2)
+                HStack(spacing: 6) {
+                    Text(item.name)
+                        .lineLimit(2)
+                    if isSiteRoot {
+                        Text("网站根目录")
+                            .font(.caption2.weight(.semibold))
+                            .foregroundColor(.white)
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 1)
+                            .background(Color.accentColor, in: RoundedRectangle(cornerRadius: 4))
+                    }
+                }
                 Text(subtitle)
                     .font(.caption)
                     .foregroundColor(.secondary)
@@ -332,7 +414,7 @@ private struct FileRow: View {
     }
 
     private var icon: String {
-        if item.isDirectory { return "folder.fill" }
+        if item.isDirectory { return isSiteRoot ? "globe" : "folder.fill" }
         switch item.url.pathExtension.lowercased() {
         case "html", "htm": return "globe"
         case "css": return "paintbrush"

@@ -16,6 +16,10 @@ struct FileItem: Identifiable, Hashable {
     var isHTML: Bool {
         ["html", "htm"].contains(url.pathExtension.lowercased())
     }
+
+    var isZip: Bool {
+        !isDirectory && url.pathExtension.lowercased() == "zip"
+    }
 }
 
 enum FileStore {
@@ -61,36 +65,83 @@ enum FileStore {
         }
     }
 
-    /// 把从「文件」App 选中的文件或文件夹复制进来，同名项目会被覆盖
-    @discardableResult
-    static func importItems(_ urls: [URL], into directory: URL) throws -> Int {
+    /// www 下的所有文件夹（相对路径），用于选择导入位置，最多列出 4 层
+    static func allFolders(maxDepth: Int = 4) -> [String] {
+        var result = [""]
+        func walk(_ url: URL, _ relative: String, _ depth: Int) {
+            guard depth < maxDepth else { return }
+            for item in contents(of: url) where item.isDirectory {
+                let path = relative.isEmpty ? item.name : relative + "/" + item.name
+                result.append(path)
+                walk(item.url, path, depth + 1)
+            }
+        }
+        walk(rootURL, "", 0)
+        return result
+    }
+
+    struct ImportSummary {
+        var imported = 0
+        var extractedFiles = 0
+        var failures: [String] = []
+
+        var message: String {
+            var parts: [String] = []
+            if imported > 0 { parts.append("已导入 \(imported) 项") }
+            if extractedFiles > 0 { parts.append("解压出 \(extractedFiles) 个文件") }
+            if !failures.isEmpty { parts.append("失败：\n" + failures.joined(separator: "\n")) }
+            return parts.isEmpty ? "没有导入任何文件" : parts.joined(separator: "，")
+        }
+    }
+
+    /// 把选中的文件或文件夹复制进来，同名项目会被覆盖；zip 可选择直接解压
+    static func importItems(_ urls: [URL], into directory: URL, extractZips: Bool) -> ImportSummary {
         let fileManager = FileManager.default
-        var count = 0
-        var firstError: Error?
+        var summary = ImportSummary()
         for source in urls {
             let accessing = source.startAccessingSecurityScopedResource()
             defer {
                 if accessing { source.stopAccessingSecurityScopedResource() }
             }
-            let destination = directory.appendingPathComponent(source.lastPathComponent)
             do {
-                if fileManager.fileExists(atPath: destination.path) {
-                    try fileManager.removeItem(at: destination)
+                if extractZips && source.pathExtension.lowercased() == "zip" {
+                    let result = try ZipExtractor.extract(source, into: directory)
+                    summary.imported += 1
+                    summary.extractedFiles += result.files
+                } else {
+                    let destination = directory.appendingPathComponent(source.lastPathComponent)
+                    if fileManager.fileExists(atPath: destination.path) {
+                        try fileManager.removeItem(at: destination)
+                    }
+                    try fileManager.copyItem(at: source, to: destination)
+                    summary.imported += 1
                 }
-                try fileManager.copyItem(at: source, to: destination)
-                count += 1
             } catch {
-                firstError = firstError ?? error
+                summary.failures.append("\(source.lastPathComponent)：\(error.localizedDescription)")
             }
         }
-        if count == 0, let firstError {
-            throw firstError
+        return summary
+    }
+
+    static func extractZip(_ item: FileItem) throws -> ZipExtractor.Result {
+        try ZipExtractor.extract(item.url, into: item.url.deletingLastPathComponent())
+    }
+
+    /// 其他 App 通过“用其他应用打开”传来的文件会被系统放在 Documents/Inbox，导入后清理掉
+    static func cleanUpInbox(_ urls: [URL]) {
+        let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+            .standardizedFileURL.resolvingSymlinksInPath().path
+        for url in urls {
+            let path = url.standardizedFileURL.resolvingSymlinksInPath().path
+            if path.hasPrefix(documents + "/Inbox/") {
+                try? FileManager.default.removeItem(at: url)
+            }
         }
-        return count
     }
 
     static func createFolder(named name: String, in directory: URL) throws {
-        let url = directory.appendingPathComponent(try validated(name), isDirectory: true)
+        let name = try validated(name)
+        let url = directory.appendingPathComponent(name, isDirectory: true)
         guard !FileManager.default.fileExists(atPath: url.path) else { throw StoreError.exists }
         try FileManager.default.createDirectory(at: url, withIntermediateDirectories: false)
     }
@@ -108,7 +159,8 @@ enum FileStore {
     }
 
     static func rename(_ item: FileItem, to name: String) throws {
-        let destination = item.url.deletingLastPathComponent().appendingPathComponent(try validated(name))
+        let name = try validated(name)
+        let destination = item.url.deletingLastPathComponent().appendingPathComponent(name)
         guard destination != item.url else { return }
         guard !FileManager.default.fileExists(atPath: destination.path) else { throw StoreError.exists }
         try FileManager.default.moveItem(at: item.url, to: destination)
@@ -118,13 +170,18 @@ enum FileStore {
         try FileManager.default.removeItem(at: item.url)
     }
 
-    /// 相对网站根目录的 URL 路径，例如 `/blog/index.html`
-    static func webPath(for url: URL) -> String {
-        let rootPath = rootURL.standardizedFileURL.resolvingSymlinksInPath().path
+    /// 相对 www 的路径，例如 `blog/assets`；不在 www 内时返回 nil
+    static func relativePath(of url: URL, to base: URL = rootURL) -> String? {
+        let basePath = base.standardizedFileURL.resolvingSymlinksInPath().path
         let path = url.standardizedFileURL.resolvingSymlinksInPath().path
-        guard path.hasPrefix(rootPath) else { return "/" }
-        let relative = String(path.dropFirst(rootPath.count))
-        return relative.hasPrefix("/") ? relative : "/" + relative
+        if path == basePath { return "" }
+        guard path.hasPrefix(basePath + "/") else { return nil }
+        return String(path.dropFirst(basePath.count + 1))
+    }
+
+    /// 文件在某个网站根目录下对应的 URL 路径，例如 `/blog/index.html`；不在该网站内时返回 nil
+    static func webPath(for url: URL, siteRoot: URL) -> String? {
+        relativePath(of: url, to: siteRoot).map { "/" + $0 }
     }
 
     private static func validated(_ name: String) throws -> String {
