@@ -429,10 +429,12 @@ enum Unescaper {
                 let count = next == "x" ? 2 : (next == "u" ? 4 : 8)
                 index += 1
                 var value = 0
-                for _ in 0..<count, index < characters.count {
-                    guard let digit = Int(String(characters[index]), radix: 16) else { break }
+                var digits = 0
+                while digits < count, index < characters.count,
+                      let digit = Int(String(characters[index]), radix: 16) {
                     value = value * 16 + digit
                     index += 1
+                    digits += 1
                 }
                 if let scalar = UnicodeScalar(value) { result.append(Character(scalar)) }
             default:
