@@ -177,7 +177,7 @@ final class RenPyArchive {
 
     /// RPA-2.0/3.0 的索引：`{名字: [(偏移, 长度), ...]}`
     private func applyDictionary(_ index: PyValue, fileEnd: Int, xorKey: Int?) -> Bool {
-        guard case .dictionary(let pairs)? = index, !pairs.isEmpty else { return false }
+        guard case .dictionary(let pairs) = index, !pairs.isEmpty else { return false }
         var count = 0
         for (rawName, rawEntries) in pairs {
             guard let name = Self.name(from: rawName), let entries = rawEntries.arrayValue else { continue }

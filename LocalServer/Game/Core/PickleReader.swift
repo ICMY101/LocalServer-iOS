@@ -283,9 +283,9 @@ enum PickleReader {
                 replaceTop(.dictionary(pairs)); return true
             case Opcode.setitems:
                 guard let flat = popMark(), flat.count % 2 == 0,
-                      let container = topValue(), case .dictionary(var pairs) = container else { return false }
-                pairs.append(contentsOf: pairs(from: flat))
-                replaceTop(.dictionary(pairs)); return true
+                      let container = topValue(), case .dictionary(var existing) = container else { return false }
+                existing.append(contentsOf: pairs(from: flat))
+                replaceTop(.dictionary(existing)); return true
 
             case Opcode.emptySet: push(.array([])); return true
             case Opcode.addItems, Opcode.frozenset: return false

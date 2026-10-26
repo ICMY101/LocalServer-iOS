@@ -275,7 +275,7 @@ struct RpyParser {
         default:
             var attempt = LineScanner(line.text)
             if let say = parseSay(&attempt) { return [say] }
-            if introducesBlock(line.text) { // 未知的带块语句：整块跳过，免得把块内容当成顶层语句
+            if RpyParser.introducesBlock(line.text) { // 未知的带块语句：整块跳过，免得把块内容当成顶层语句
                 skipChildBlock(parentIndent: line.indent)
                 return [.ignored("跳过未知语句块：\(keyword)")]
             }
@@ -285,7 +285,7 @@ struct RpyParser {
 
     /// 这条语句不影响剧情，可以整条（含块）忽略
     private mutating func ignore(_ line: LogicalLine, _ label: String) -> [VNStmt] {
-        if introducesBlock(line.text) { skipChildBlock(parentIndent: line.indent) }
+        if RpyParser.introducesBlock(line.text) { skipChildBlock(parentIndent: line.indent) }
         return [.ignored(label)]
     }
 
@@ -326,7 +326,7 @@ struct RpyParser {
     private mutating func parseMenu(_ scanner: inout LineScanner, line: LogicalLine) -> [VNStmt] {
         _ = labelName(&scanner)
         _ = scanner.parenthesizedBody()
-        guard introducesBlock(line.text) else { return [.unknown(line: line.text)] }
+        guard RpyParser.introducesBlock(line.text) else { return [.unknown(line: line.text)] }
         guard cursor < lines.count, lines[cursor].indent > line.indent else {
             return [.menu(title: nil, items: [])]
         }
@@ -576,7 +576,7 @@ private let clauseKeywords: Set<String> = [
 ]
 
 /// 字符串前缀字母（`r`、`f`、`b`、`u` 的组合）
-private let stringPrefixCharacters = Set(["r", "b", "f", "u", "R", "B", "F", "U"])
+private let stringPrefixCharacters = Set("rbfuRBFU")
 
 /// 一条逻辑行内部的扫描器
 private struct LineScanner {

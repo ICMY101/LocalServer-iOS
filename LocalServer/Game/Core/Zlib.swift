@@ -45,49 +45,37 @@ enum Zlib {
     /// 裸 deflate 解压；输出长度未知，按块边解边收
     private static func rawInflate(_ data: Data) -> Data? {
         guard !data.isEmpty else { return nil }
-        var stream = compression_stream()
-        guard compression_stream_init(&stream, COMPRESSION_STREAM_DECODE, COMPRESSION_ZLIB) != COMPRESSION_STATUS_ERROR else {
-            return nil
-        }
-        defer { compression_stream_destroy(&stream) }
 
         let chunkSize = 256 * 1024
         var output = [UInt8](repeating: 0, count: chunkSize)
-        var result = Data()
-        result.reserveCapacity(data.count * 4)
 
-        let status = data.withUnsafeBytes { (source: UnsafeRawBufferPointer) -> compression_status in
-            guard let base = source.bindMemory(to: UInt8.self).baseAddress else {
-                return COMPRESSION_STATUS_ERROR
-            }
-            stream.src_ptr = base
-            stream.src_size = source.count
+        return data.withUnsafeBytes { (source: UnsafeRawBufferPointer) -> Data? in
+            guard let input = source.bindMemory(to: UInt8.self).baseAddress else { return nil }
+            return output.withUnsafeMutableBytes { (destination: UnsafeMutableRawBufferPointer) -> Data? in
+                guard let outputBase = destination.bindMemory(to: UInt8.self).baseAddress else { return nil }
+                var stream = compression_stream(dst_ptr: outputBase, dst_size: chunkSize,
+                                               src_ptr: input, src_size: source.count, state: nil)
+                guard compression_stream_init(&stream, COMPRESSION_STREAM_DECODE, COMPRESSION_ZLIB)
+                        != COMPRESSION_STATUS_ERROR else { return nil }
+                defer { compression_stream_destroy(&stream) }
 
-            while true {
-                var written = 0
-                let stepStatus = output.withUnsafeMutableBytes { raw -> compression_status in
-                    stream.dst_ptr = raw.bindMemory(to: UInt8.self).baseAddress!
+                var result = Data()
+                result.reserveCapacity(data.count * 4)
+
+                while true {
                     stream.dst_size = chunkSize
                     // 每次都给 FINALIZE，让解码器在数据结束时完成收尾
-                    let status = compression_stream_process(&stream, Int32(COMPRESSION_STREAM_FINALIZE.rawValue))
-                    written = chunkSize - stream.dst_size
-                    return status
-                }
-                if written > 0 {
-                    result.append(contentsOf: output[0..<written])
-                }
-                switch stepStatus {
-                case COMPRESSION_STATUS_END:
-                    return COMPRESSION_STATUS_OK
-                case COMPRESSION_STATUS_ERROR:
-                    return COMPRESSION_STATUS_ERROR
-                default:
-                    // 输出缓冲被填满则继续；输入耗尽但没收到 END 说明数据不完整
-                    if stream.dst_size != 0 { return COMPRESSION_STATUS_OK }
-                    if stream.src_size == 0 { return COMPRESSION_STATUS_ERROR }
+                    let stepStatus = compression_stream_process(&stream, Int32(COMPRESSION_STREAM_FINALIZE.rawValue))
+                    let filled = chunkSize - stream.dst_size
+                    if filled > 0 {
+                        result.append(contentsOf: UnsafeBufferPointer(start: outputBase, count: filled))
+                    }
+                    if stepStatus == COMPRESSION_STATUS_END { return result }
+                    if stepStatus == COMPRESSION_STATUS_ERROR { return nil }
+                    // 输出没写满却没收到 END、或输入已耗尽都没走完，说明数据不完整
+                    if stream.dst_size != 0 || stream.src_size == 0 { return nil }
                 }
             }
         }
-        return status == COMPRESSION_STATUS_OK ? result : nil
     }
 }
