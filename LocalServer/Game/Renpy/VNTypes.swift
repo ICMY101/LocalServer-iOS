@@ -1,7 +1,7 @@
 import Foundation
 
 /// Ren'Py 运行时里流动的值。
-indirect enum VNValue {
+indirect enum VNValue: Equatable {
     case none
     case bool(Bool)
     case int(Int)
