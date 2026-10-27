@@ -213,7 +213,12 @@ struct RpyParser {
         var scanner = LineScanner(line.text)
 
         if scanner.match("$") { return parseInlinePython(line) }
-        guard let keyword = scanner.word() else { return [.unknown(line: line.text)] }
+        guard let keyword = scanner.word() else {
+            // 旁白是直接以引号开头的一行，没有说话人关键字
+            var narration = LineScanner(line.text)
+            if let say = parseSay(&narration) { return [say] }
+            return [.unknown(line: line.text)]
+        }
 
         switch keyword {
         case "label":
@@ -229,7 +234,12 @@ struct RpyParser {
         case "menu":
             return parseMenu(&scanner, line: line)
         case "jump":
-            guard !scanner.keyword("expression"), let target = labelName(&scanner) else {
+            if scanner.keyword("expression") {
+                let source = scanner.rest()
+                return source.isEmpty ? [.unknown(line: line.text)]
+                                     : [.jumpExpression(ExpressionParser.parse(source), source: source)]
+            }
+            guard let target = labelName(&scanner) else {
                 return [.unknown(line: line.text)]
             }
             return [.jump(label: target)]
@@ -275,7 +285,7 @@ struct RpyParser {
         default:
             var attempt = LineScanner(line.text)
             if let say = parseSay(&attempt) { return [say] }
-            if introducesBlock(line.text) { // 未知的带块语句：整块跳过，免得把块内容当成顶层语句
+            if RpyParser.introducesBlock(line.text) { // 未知的带块语句：整块跳过，免得把块内容当成顶层语句
                 skipChildBlock(parentIndent: line.indent)
                 return [.ignored("跳过未知语句块：\(keyword)")]
             }
@@ -285,7 +295,7 @@ struct RpyParser {
 
     /// 这条语句不影响剧情，可以整条（含块）忽略
     private mutating func ignore(_ line: LogicalLine, _ label: String) -> [VNStmt] {
-        if introducesBlock(line.text) { skipChildBlock(parentIndent: line.indent) }
+        if RpyParser.introducesBlock(line.text) { skipChildBlock(parentIndent: line.indent) }
         return [.ignored(label)]
     }
 
@@ -326,7 +336,7 @@ struct RpyParser {
     private mutating func parseMenu(_ scanner: inout LineScanner, line: LogicalLine) -> [VNStmt] {
         _ = labelName(&scanner)
         _ = scanner.parenthesizedBody()
-        guard introducesBlock(line.text) else { return [.unknown(line: line.text)] }
+        guard RpyParser.introducesBlock(line.text) else { return [.unknown(line: line.text)] }
         guard cursor < lines.count, lines[cursor].indent > line.indent else {
             return [.menu(title: nil, items: [])]
         }
@@ -347,9 +357,17 @@ struct RpyParser {
                 _ = item.parenthesizedBody()
                 var condition: VNExpr? = nil
                 var showIf: VNExpr? = nil
-                if item.keyword("if") { condition = ExpressionParser.parse(item.expressionUpToColon()) }
-                if item.keyword("showif") { showIf = ExpressionParser.parse(item.expressionUpToColon()) }
-                if item.match(":") {
+                // expressionUpToColon 会把结尾的冒号一起吃掉，就不再要求 match(":")
+                var colonConsumed = false
+                if item.keyword("if") {
+                    condition = ExpressionParser.parse(item.expressionUpToColon())
+                    colonConsumed = true
+                }
+                if item.keyword("showif") {
+                    showIf = ExpressionParser.parse(item.expressionUpToColon())
+                    colonConsumed = true
+                }
+                if colonConsumed || item.match(":") {
                     items.append(VNMenuItem(text: .literal(.string(raw)),
                                             condition: condition,
                                             showIf: showIf,
@@ -390,7 +408,10 @@ struct RpyParser {
         _ = scanner.keyword("with")
         _ = scanner.upToClause()
         if scanner.match(":") { skipChildBlock(parentIndent: line.indent) }
-        return [.show(name: specifier.name, expression: specifier.expression, layer: specifier.layer)]
+        return [.show(name: specifier.name,
+                      expression: specifier.expression,
+                      layer: specifier.layer,
+                      at: specifier.at)]
     }
 
     private mutating func parseHide(_ scanner: inout LineScanner, line: LogicalLine) -> [VNStmt] {
@@ -457,10 +478,12 @@ struct RpyParser {
     private mutating func parsePlay(_ scanner: inout LineScanner, line: LogicalLine) -> [VNStmt] {
         guard let channel = scanner.word() else { return [.unknown(line: line.text)] }
         let file = fileExpression(&scanner)
-        var loop = false
+        // music 通道默认循环，其余通道默认不循环，和 Ren'Py 的通道默认值一致
+        var loop = channel == "music"
         var volume = 1.0
         while !scanner.isAtEnd {
             if scanner.keyword("loop") { loop = true; continue }
+            if scanner.keyword("noloop") { loop = false; continue }
             if scanner.keyword("volume") { volume = scanner.doubleValue() ?? volume; continue }
             scanner.skipToken()
         }
@@ -538,11 +561,13 @@ struct RpyParser {
     }
 
     /// `show/scene/hide` 后的图像名，以及 `expression`、`onlayer`、`at` 等子句
-    private func imageSpecifier(_ scanner: inout LineScanner) -> (name: String, expression: VNExpr?, layer: String) {
+    private func imageSpecifier(_ scanner: inout LineScanner)
+        -> (name: String, expression: VNExpr?, layer: String, at: [String]) {
         var layer = "master"
+        var at: [String] = []
         if scanner.keyword("expression") || scanner.keyword("image") {
             let source = scanner.upToClause()
-            return (source, ExpressionParser.parse(source), layer)
+            return (source, ExpressionParser.parse(source), layer, at)
         }
 
         var components: [String] = []
@@ -555,7 +580,11 @@ struct RpyParser {
                 layer = scanner.word() ?? layer
                 continue
             }
-            if scanner.keyword("at") || scanner.keyword("zorder") || scanner.keyword("behind") {
+            if scanner.keyword("at") {
+                at = RpyParser.transformNames(scanner.upToClause())
+                continue
+            }
+            if scanner.keyword("zorder") || scanner.keyword("behind") {
                 _ = scanner.upToClause()
                 continue
             }
@@ -565,7 +594,26 @@ struct RpyParser {
             }
             break
         }
-        return (components.joined(separator: " "), nil, layer)
+        return (components.joined(separator: " "), nil, layer, at)
+    }
+
+    /// `left right(.85) center` —— 按顶层空格切开，括号里的空格不算分隔
+    static func transformNames(_ text: String) -> [String] {
+        var names: [String] = []
+        var current = ""
+        var depth = 0
+        for character in text {
+            if character == "(" || character == "[" { depth += 1 }
+            if character == ")" || character == "]" { depth -= 1 }
+            if character == " ", depth == 0 {
+                if !current.isEmpty { names.append(current) }
+                current = ""
+                continue
+            }
+            current.append(character)
+        }
+        if !current.isEmpty { names.append(current) }
+        return names
     }
 }
 
@@ -576,7 +624,7 @@ private let clauseKeywords: Set<String> = [
 ]
 
 /// 字符串前缀字母（`r`、`f`、`b`、`u` 的组合）
-private let stringPrefixCharacters = Set(["r", "b", "f", "u", "R", "B", "F", "U"])
+private let stringPrefixCharacters = Set("rbfuRBFU")
 
 /// 一条逻辑行内部的扫描器
 private struct LineScanner {

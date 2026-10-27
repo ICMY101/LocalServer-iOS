@@ -80,6 +80,9 @@ struct ContentView: View {
             }
             .tabItem { Label("文件", systemImage: "folder.fill") }
 
+            VNLibraryView()
+                .tabItem { Label("游戏", systemImage: "text.book.closed.fill") }
+
             SettingsView()
                 .tabItem { Label("设置", systemImage: "gearshape.fill") }
         }

@@ -136,38 +136,129 @@ final class GameAssets {
     // MARK: - 图片与音频
 
     private static let imageExtensions = ["webp", "png", "jpg", "jpeg", "gif"]
-    private static let imageDirectories = ["", "bg/", "characters/", "images/", "gui/", "cg/"]
+    private static let imageDirectories = [
+        "", "images/", "bg/", "images/bg/", "characters/", "images/characters/",
+        "cg/", "images/cg/", "gui/", "images/gui/"
+    ]
 
-    /// 按 Ren'Py 的空格命名习惯找图片：`show bg library` -> `bg library.png`
-    func imageData(named name: String) -> Data? {
-        let lowered = normalized(name)
-        for directory in Self.imageDirectories {
-            let base = directory.isEmpty ? lowered : directory + lowered
-            for ext in Self.imageExtensions {
-                if let data = read(base + "." + ext) { return data }
+    /// `images/bg/home_front_night.webp` -> `bg home front night`
+    ///
+    /// 这是 Ren'Py 的自动图片命名规则：`images/` 下的子目录和文件名里的下划线
+    /// 都当作空格，图片名就是由此拼出来的标签 + 属性。
+    private lazy var autoImageIndex: [String: String] = {
+        var index: [String: String] = [:]
+        for path in allNames() where path.hasPrefix("images/") {
+            guard let ext = Self.pathExtension(path), Self.imageExtensions.contains(ext) else { continue }
+            let stem = String(path.dropFirst("images/".count).dropLast(ext.count + 1))
+            for name in Self.automaticNames(stem) where index[name] == nil {
+                index[name] = path
             }
         }
-        // 文件名里的空格换成下划线再试一次
-        let underscored = lowered.replacingOccurrences(of: " ", with: "_")
-        for ext in Self.imageExtensions {
-            if let data = read(underscored + "." + ext) { return data }
+        return index
+    }()
+
+    /// 一个图片文件可能对应的名字：
+    /// 1. 路径里的 `/` 和下划线都当空格（Ren'Py 自动图片的通用规则）；
+    /// 2. `cg-08-05-report_ashamed` 这类 CG 文件名，游戏自己的脚本会注册成
+    ///    `cg report ashamed`（去掉编号，只留前缀和标题）；
+    /// 3. 立绘部件和叠加层按去掉 `fg/`、`overlay/` 目录的名字引用：
+    ///    `images/fg/hana/body_base.webp` 就是 `hana body base`。
+    private static func automaticNames(_ stem: String) -> [String] {
+        var names = [spaceName(stem)]
+        let file = stem.split(separator: "/").last.map(String.init) ?? stem
+        let parts = file.split(separator: "-", omittingEmptySubsequences: false)
+        if parts.count == 4 {
+            names.append(spaceName(String(parts[0]) + " " + String(parts[3])))
+        }
+        for prefix in ["fg/", "overlay/"] where stem.hasPrefix(prefix) {
+            names.append(spaceName(String(stem.dropFirst(prefix.count))))
+        }
+        return names
+    }
+
+    /// 按 Ren'Py 的空格命名习惯找图片：`show bg library` -> `images/bg/library.png`
+    func imagePath(named name: String) -> String? {
+        let lowered = normalized(name)
+        // `image bg room = "bg/room.png"` 这种已经带扩展名的路径直接读
+        if hasImageExtension(lowered), exists(lowered) { return lowered }
+        // images/ 下的自动命名（真实工程基本都是这种布局）
+        if let path = autoImageIndex[Self.spaceName(lowered)] { return path }
+        for directory in Self.imageDirectories {
+            let base = directory.isEmpty ? lowered : directory + lowered
+            for candidate in [base, base.replacingOccurrences(of: " ", with: "_")] {
+                if hasImageExtension(candidate), exists(candidate) { return candidate }
+                for ext in Self.imageExtensions where exists(candidate + "." + ext) {
+                    return candidate + "." + ext
+                }
+            }
         }
         return nil
     }
 
+    /// `images/fg/`、`images/overlay/`、`characters/` 下的是前景素材：
+    /// 透明画布、要按变换摆放，不能像背景那样整屏拉满
+    func isForegroundImage(at path: String) -> Bool {
+        let lowered = path.lowercased()
+        let directories = ["/fg/", "/overlay/", "/characters/", "/sprite/", "/sprites/"]
+        if directories.contains(where: { lowered.contains($0) }) { return true }
+        return ["fg/", "overlay/", "characters/", "sprite/", "sprites/"].contains { lowered.hasPrefix($0) }
+    }
+
+    private func hasImageExtension(_ name: String) -> Bool {
+        guard let ext = Self.pathExtension(name) else { return false }
+        return Self.imageExtensions.contains(ext)
+    }
+
     private static let audioExtensions = ["ogg", "oga", "mp3", "wav", "m4a"]
 
-    /// 音频：先按原样找，再试常见的 audio/ 目录
+    /// 去掉扩展名的完整路径、路径后缀和文件名都能命中音频。
+    /// 真实工程把音乐放在 `audio/bgm/`、音效放在 `audio/sound/`，脚本里往往只写裸文件名。
+    private lazy var audioIndex: [String: String] = {
+        var index: [String: String] = [:]
+        for path in allNames() {
+            guard let ext = Self.pathExtension(path), Self.audioExtensions.contains(ext) else { continue }
+            let stem = String(path.dropLast(ext.count + 1))
+            var suffixes = [path, stem]
+            var rest = stem[...]
+            while let slash = rest.firstIndex(of: "/") {
+                rest = rest[rest.index(after: slash)...]
+                suffixes.append(String(rest))
+            }
+            for suffix in suffixes where index[suffix] == nil {
+                index[suffix] = path
+            }
+        }
+        return index
+    }()
+
+    /// 音频：先按原样找，再按去掉目录的文件名找，最后试常见的 audio/ 目录
     func audioData(named name: String) -> Data? {
-        if hasAudioExtension(name), let data = read(name) { return data }
-        for directory in ["", "audio/", "music/", "sound/", "voice/", "ogg/"] {
-            let candidate = directory + name
+        let key = normalized(name)
+        if hasAudioExtension(key), let data = read(key) { return data }
+        if hasAudioExtension(key), let path = audioIndex[key], let data = read(path) { return data }
+        if let path = audioIndex[key], let data = read(path) { return data }
+        for directory in ["", "audio/", "music/", "sound/", "voice/", "ogg/", "audio/bgm/", "audio/sound/", "audio/voice/"] {
+            let candidate = directory + key
             if hasAudioExtension(candidate), let data = read(candidate) { return data }
             for ext in Self.audioExtensions {
                 if let data = read(candidate + "." + ext) { return data }
             }
         }
         return nil
+    }
+
+    private static func pathExtension(_ path: String) -> String? {
+        guard let dot = path.lastIndex(of: ".") else { return nil }
+        return String(path[path.index(after: dot)...])
+    }
+
+    /// 目录分隔符、下划线和连续空格都折叠成单个空格
+    private static func spaceName(_ name: String) -> String {
+        name.replacingOccurrences(of: "/", with: " ")
+            .replacingOccurrences(of: "_", with: " ")
+            .split(separator: " ", omittingEmptySubsequences: true)
+            .joined(separator: " ")
+            .lowercased()
     }
 
     private func hasAudioExtension(_ name: String) -> Bool {
@@ -177,12 +268,14 @@ final class GameAssets {
 }
 
 extension FileManager {
-    /// 目录内（不含子目录）是否有 .rpy / .rpa 脚本
+    /// 目录内（不含子目录）是否有脚本或归档：.rpy / .rpyc / .rpym / .rpymc / .rpa
     func hasScriptFiles(in directory: URL) -> Bool {
         guard let names = try? contentsOfDirectory(atPath: directory.path) else { return false }
         return names.contains {
             let lower = $0.lowercased()
-            return lower.hasSuffix(".rpy") || lower.hasSuffix(".rpa") || lower.hasSuffix(".rpym")
+            return lower.hasSuffix(".rpy") || lower.hasSuffix(".rpyc")
+                || lower.hasSuffix(".rpym") || lower.hasSuffix(".rpymc")
+                || lower.hasSuffix(".rpa")
         }
     }
 

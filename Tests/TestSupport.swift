@@ -139,9 +139,14 @@ final class TemporaryDirectory {
 
     @discardableResult
     func write(_ relativePath: String, _ content: String) throws -> URL {
+        try write(relativePath, Data(content.utf8))
+    }
+
+    @discardableResult
+    func write(_ relativePath: String, _ data: Data) throws -> URL {
         let file = url.appendingPathComponent(relativePath)
         try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try Data(content.utf8).write(to: file)
+        try data.write(to: file)
         return file
     }
 

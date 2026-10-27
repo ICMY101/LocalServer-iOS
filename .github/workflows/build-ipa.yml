@@ -2,7 +2,7 @@ name: Build IPA
 
 on:
   push:
-    branches: [main, master]
+    branches: [main, master, "feat/**"]
     tags: ["v*"]
   workflow_dispatch:
 
@@ -41,6 +41,7 @@ jobs:
       - name: 编译（不签名）
         run: |
           set -o pipefail
+          set +e
           xcodebuild \
             -project LocalServer.xcodeproj \
             -scheme LocalServer \
@@ -54,8 +55,24 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
-            build | tee build.log | grep -E "error:|warning: .*LocalServer/|BUILD (SUCCEEDED|FAILED)" || true
-          test -d build/Build/Products/Release-iphoneos/LocalServer.app
+            build > build.log 2>&1
+          status=$?
+          grep -E "error:|warning: .*LocalServer/|BUILD (SUCCEEDED|FAILED)" build.log
+          # 编译错误转成 annotation，公开仓库里不登录也能读到具体行
+          grep -m5 -E "error: " build.log | sed 's/%/%25/g' | while IFS= read -r line; do
+            echo "::error::$line"
+          done
+          if [ $status -ne 0 ] || [ ! -d build/Build/Products/Release-iphoneos/LocalServer.app ]; then
+            # 没有 error: 行时（xcodebuild 中途退出等）把日志结尾也报出来，否则失败无从诊断
+            echo "::error::xcodebuild 退出码 $status，没有产出 app，下面是 build.log 结尾"
+            grep -m8 -E "error|fatal|failed|FAILED" build.log | sed 's/%/%25/g' | while IFS= read -r line; do
+              echo "::error::$line"
+            done
+            tail -n 6 build.log | sed 's/%/%25/g' | while IFS= read -r line; do
+              echo "::error::$line"
+            done
+            exit 1
+          fi
 
       - name: 打包 IPA
         run: |
@@ -105,6 +122,10 @@ jobs:
             CODE_SIGN_IDENTITY="-" \
             CODE_SIGN_STYLE=Manual \
             | tee test.log | grep -E "error:|Test Case .* (passed|failed)|Executed [0-9]+ tests|TEST (SUCCEEDED|FAILED)" || true
+          # 失败用例和断言信息转成 annotation，方便直接定位（不要 Test Case 汇总行，占名额）
+          grep -m10 -E "error: |Testing failed" test.log | sed 's/%/%25/g' | while IFS= read -r line; do
+            echo "::error::$line"
+          done || true
           grep -q "TEST SUCCEEDED" test.log
 
       - name: 上传日志

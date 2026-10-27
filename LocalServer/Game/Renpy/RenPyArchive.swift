@@ -3,9 +3,10 @@ import Foundation
 /// Ren'Py 归档（.rpa）的读取。
 ///
 /// 对照 renpy/loader.py 的 archive_handlers，支持三种索引：
-/// - `RPA-3.0 `：头 40 字节为 `RPA-3.0 <16 位十六进制索引偏移> <8 位十六进制混淆密钥>`，
+/// - 3.x：头前 8 字节是魔数（`RPA-3.0 `，也可能被发行版改掉），
+///   紧跟 16 位十六进制索引偏移，再跟 8 位十六进制混淆密钥；
 ///   索引 zlib 压缩后以 pickle 存放，每个 (偏移, 长度) 都要与密钥异或还原；
-/// - `RPA-2.0 `：头 24 字节，索引同样 zlib + pickle，但不混淆；
+/// - 2.0：只有索引偏移，索引同样 zlib + pickle，但不混淆；
 /// - 旧版：文件以「索引长度 + 空格」开头，索引是 Python 字面量 repr。
 ///
 /// 成员是否压缩取决于打包时的 Ren'Py 版本（新版原样存放，旧版是 zlib 流），
@@ -108,47 +109,41 @@ final class RenPyArchive {
         guard let head = readHead(reader, count: min(40, size)) else { return false }
         let ascii = String(decoding: head, as: UTF8.self)
 
-        if ascii.hasPrefix("RPA-3.0 ") {
-            reader.seek(toFileOffset: 0)
-            guard let index = readZlibPickledIndex(reader: reader, header: head, offsetRange: 8 ..< 24) else {
-                return false
-            }
-            let xorKey = Self.hexValue(ascii, in: 25 ..< 33) ?? 0
-            return applyDictionary(index, fileEnd: size, xorKey: xorKey)
-        }
-
-        if ascii.hasPrefix("RPA-2.0 ") {
-            reader.seek(toFileOffset: 0)
-            guard let index = readZlibPickledIndex(reader: reader, header: head, offsetRange: 8 ..< 24) else {
-                return false
-            }
-            return applyDictionary(index, fileEnd: size, xorKey: nil)
-        }
-
+        // 旧版索引：以索引长度开头，后面是 repr 文本
         if let first = ascii.utf8.first, first >= 0x30, first <= 0x39 {
             return applyLegacyIndex(reader: reader, ascii: ascii, size: size)
         }
-        return false
+
+        // 新版头：魔数之后的 8..<24 是索引偏移；3.x 在 25..<33 还有异或密钥。
+        // 魔数本身不参与解析，被发行版改掉也能读
+        guard let indexOffset = Self.hexValue(ascii, in: 8 ..< 24), indexOffset > 0,
+              indexOffset < size else { return false }
+        reader.seek(toFileOffset: UInt64(indexOffset))
+        guard let blob = try? reader.readToEnd(), !blob.isEmpty, let plain = Zlib.inflate(blob) else {
+            return false
+        }
+        guard let loaded = PickleReader.load(plain)
+                ?? PythonLiteral.parsePrefix(String(decoding: plain, as: UTF8.self)) else { return false }
+        let index: PyValue
+        if let array = loaded.arrayValue {
+            // 少数工具把索引写成列表，转成字典统一处理
+            guard let converted = convertLegacyList(array) else { return false }
+            index = converted
+        } else {
+            index = loaded
+        }
+
+        if let xorKey = Self.hexValue(ascii, in: 25 ..< 33),
+           applyDictionary(index, fileEnd: size, xorKey: xorKey) {
+            return true
+        }
+        // 2.0 没有密钥；密钥误解或不存在时按原值再试
+        placements.removeAll()
+        return applyDictionary(index, fileEnd: size, xorKey: nil)
     }
 
     private func readHead(_ reader: FileHandle, count: Int) -> Data? {
         try? reader.read(upToCount: count)
-    }
-
-    /// 头部给出索引偏移，索引是 zlib 压缩后的 pickle
-    private func readZlibPickledIndex(reader: FileHandle, header: Data, offsetRange: Range<Int>) -> PyValue? {
-        let ascii = String(decoding: header, as: UTF8.self)
-        guard let indexOffset = Self.hexValue(ascii, in: offsetRange), indexOffset > 0 else { return nil }
-
-        reader.seek(toFileOffset: UInt64(indexOffset))
-        guard let blob = try? reader.readToEnd(), !blob.isEmpty, let plain = Zlib.inflate(blob) else { return nil }
-        guard let index = PickleReader.load(plain)
-                ?? PythonLiteral.parsePrefix(String(decoding: plain, as: UTF8.self)) else { return nil }
-        if let array = index.arrayValue {
-            // 少数工具把索引写成列表，转成字典统一处理
-            return convertLegacyList(array)
-        }
-        return index
     }
 
     /// 旧版索引：`<索引长度> <repr 文本>`，之后的数据区偏移按版本解释
@@ -177,7 +172,7 @@ final class RenPyArchive {
 
     /// RPA-2.0/3.0 的索引：`{名字: [(偏移, 长度), ...]}`
     private func applyDictionary(_ index: PyValue, fileEnd: Int, xorKey: Int?) -> Bool {
-        guard case .dictionary(let pairs)? = index, !pairs.isEmpty else { return false }
+        guard case .dictionary(let pairs) = index, !pairs.isEmpty else { return false }
         var count = 0
         for (rawName, rawEntries) in pairs {
             guard let name = Self.name(from: rawName), let entries = rawEntries.arrayValue else { continue }
@@ -212,34 +207,49 @@ final class RenPyArchive {
         return count > 0
     }
 
-    /// 每个条目可能是 (偏移, 长度)、(字面量,) 或 (偏移, 长度, 字面量)
+    /// 每个条目可能是 (偏移, 长度)、(字面量,)、或 (偏移, 长度, 字面量前缀)。
+    /// 有些打包器还会写成 (字面量前缀, 偏移, 长度, 未压缩长度, …)：
+    /// 前两个相邻整数就是偏移和长度，多出来的字段忽略，非空 bytes 当作前缀。
     private func placement(from entries: [PyValue], baseOffset: Int = 0, xorKey: Int? = nil, fileEnd: Int? = nil) -> Placement? {
         var parts: [Placement.Part] = []
         for entry in entries {
             guard let values = entry.arrayValue else { return nil }
-            switch values.count {
-            case 1:
-                guard case .bytes(let data) = values[0] else { return nil }
+            if values.count == 1, case .bytes(let data) = values[0] {
                 parts.append(.literal(data))
-            case 2, 3:
-                guard var offset = values[0].intValue, var length = values[1].intValue else { return nil }
-                if let key = xorKey {
-                    offset ^= key
-                    length ^= key
-                }
-                offset += baseOffset
-                guard offset >= 0, length >= 0 else { return nil }
-                if let end = fileEnd, offset + length > end { return nil }
-                if values.count == 3, case .bytes(let start) = values[2] {
-                    // 分段文件：字面量前缀先入结果
-                    parts.append(.literal(start))
-                }
-                parts.append(.region(offset: offset, length: length))
-            default:
-                return nil
+                continue
             }
+            guard let pair = Self.offsetAndLength(in: values) else { return nil }
+            var offset = pair.offset
+            var length = pair.length
+            if let key = xorKey {
+                offset ^= key
+                length ^= key
+            }
+            offset += baseOffset
+            guard offset >= 0, length >= 0 else { return nil }
+            if let end = fileEnd, offset + length > end { return nil }
+            for value in values {
+                if case .bytes(let data) = value, !data.isEmpty {
+                    parts.append(.literal(data))
+                }
+            }
+            parts.append(.region(offset: offset, length: length))
         }
         return parts.isEmpty ? nil : Placement(parts: parts)
+    }
+
+    /// 条目里前两个相邻的整数是 (偏移, 长度)
+    private static func offsetAndLength(in values: [PyValue]) -> (offset: Int, length: Int)? {
+        var first: Int? = nil
+        for value in values {
+            guard let number = value.intValue else {
+                first = nil
+                continue
+            }
+            if let offset = first { return (offset, number) }
+            first = number
+        }
+        return nil
     }
 
     /// 文件名可能是 str、bytes 或 (目录, 文件名)

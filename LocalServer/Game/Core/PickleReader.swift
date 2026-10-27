@@ -3,8 +3,8 @@ import Foundation
 /// Python pickle 的只读子集。
 ///
 /// 只覆盖 RPA 归档索引里会出现的类型：int / bool / None / str / bytes / tuple / list / dict。
-/// 遇到对象重建指令（GLOBAL、REDUCE、NEWOBJ、BUILD 等）时判定为不支持并返回 nil ——
-/// 归档索引不该有这些指令，有则说明它不是我们认识的格式，宁可失败也不要猜。
+/// Python 3 用协议 2 打包 `bytes` 时会写成 `GLOBAL bytes + REDUCE`，所以这两种指令
+/// 只对 bytes/bytearray 这类构造开放，其余对象重建仍然判定为不支持。
 enum PickleReader {
     /// 单个条目的最大字节数，防御损坏的索引
     private static let maxLength = 64 * 1024 * 1024
@@ -14,9 +14,10 @@ enum PickleReader {
         return reader.run()
     }
 
-    /// 栈元素：真实值，或 MARK 哨兵
+    /// 栈元素：真实值、待调用的构造器，或 MARK 哨兵
     private enum Frame {
         case value(PyValue)
+        case callable(String)
         case mark
     }
 
@@ -25,7 +26,7 @@ enum PickleReader {
         let maxLength: Int
         var pos = 0
         var stack: [Frame] = []
-        var memo: [PyValue] = []
+        var memo: [Frame] = []
 
         var isAtEnd: Bool { pos >= input.count }
 
@@ -134,12 +135,12 @@ enum PickleReader {
             return values
         }
 
-        mutating func memoPut(at index: Int, value: PyValue) {
-            while memo.count <= index { memo.append(.none) }
+        mutating func memoPut(at index: Int, value: Frame) {
+            while memo.count <= index { memo.append(.value(.none)) }
             memo[index] = value
         }
 
-        mutating func memoGet(_ index: Int) -> PyValue? {
+        mutating func memoGet(_ index: Int) -> Frame? {
             guard index >= 0, index < memo.count else { return nil }
             return memo[index]
         }
@@ -283,9 +284,9 @@ enum PickleReader {
                 replaceTop(.dictionary(pairs)); return true
             case Opcode.setitems:
                 guard let flat = popMark(), flat.count % 2 == 0,
-                      let container = topValue(), case .dictionary(var pairs) = container else { return false }
-                pairs.append(contentsOf: pairs(from: flat))
-                replaceTop(.dictionary(pairs)); return true
+                      let container = topValue(), case .dictionary(var existing) = container else { return false }
+                existing.append(contentsOf: pairs(from: flat))
+                replaceTop(.dictionary(existing)); return true
 
             case Opcode.emptySet: push(.array([])); return true
             case Opcode.addItems, Opcode.frozenset: return false
@@ -297,30 +298,85 @@ enum PickleReader {
                 push(last); return true
 
             case Opcode.get:
-                guard let text = line(), let index = Int(text), let value = memoGet(index) else { return false }
-                push(value); return true
+                guard let text = line(), let index = Int(text), let frame = memoGet(index) else { return false }
+                stack.append(frame); return true
             case Opcode.binget:
-                guard let index = u8(), let value = memoGet(index) else { return false }
-                push(value); return true
+                guard let index = u8(), let frame = memoGet(index) else { return false }
+                stack.append(frame); return true
             case Opcode.longBinget:
-                guard let index = u32(), let value = memoGet(index) else { return false }
-                push(value); return true
+                guard let index = u32(), let frame = memoGet(index) else { return false }
+                stack.append(frame); return true
             case Opcode.put:
-                guard let text = line(), let index = Int(text), let last = topValue() else { return false }
+                guard let text = line(), let index = Int(text), let last = stack.last else { return false }
                 memoPut(at: index, value: last); return true
             case Opcode.binput:
-                guard let index = u8(), let last = topValue() else { return false }
+                guard let index = u8(), let last = stack.last else { return false }
                 memoPut(at: index, value: last); return true
             case Opcode.longBinput:
-                guard let index = u32(), let last = topValue() else { return false }
+                guard let index = u32(), let last = stack.last else { return false }
                 memoPut(at: index, value: last); return true
             case Opcode.memoize:
-                guard let last = topValue() else { return false }
+                guard let last = stack.last else { return false }
                 memo.append(last); return true
 
+            case Opcode.globalRef:
+                guard let module = line(), let name = line() else { return false }
+                stack.append(.callable(module + "." + name)); return true
+            case Opcode.stackGlobal:
+                guard let name = popValue(), let module = popValue(),
+                      let moduleName = module.textValue, let nameText = name.textValue else { return false }
+                stack.append(.callable(moduleName + "." + nameText)); return true
+            case Opcode.reduce:
+                guard case .value(.array(let arguments))? = stack.popLast(),
+                      let callable = stack.popLast() else { return false }
+                guard case .callable(let name) = callable,
+                      let produced = Self.construct(name, arguments) else { return false }
+                push(produced); return true
+
             default:
-                // GLOBAL / STACK_GLOBAL / REDUCE / NEWOBJ / BUILD / EXT / PERSID 等：不支持
+                // NEWOBJ / BUILD / EXT / PERSID 等对象重建指令：索引里不该出现
                 return false
+            }
+        }
+
+        /// 只认识索引里会出现的构造器，其余一律拒绝
+        static func construct(_ name: String, _ arguments: [PyValue]) -> PyValue? {
+            switch name {
+            case "__builtin__.bytes", "builtins.bytes",
+                 "__builtin__.bytearray", "builtins.bytearray":
+                guard let first = arguments.first else { return .bytes(Data()) }
+                switch first {
+                case .string(let text):
+                    return .bytes(Data(text.utf8))
+                case .bytes(let data):
+                    return .bytes(data)
+                case .array(let items):
+                    var bytes: [UInt8] = []
+                    for item in items {
+                        guard let number = item.intValue, (0...255).contains(number) else { return nil }
+                        bytes.append(UInt8(number))
+                    }
+                    return .bytes(Data(bytes))
+                default:
+                    return nil
+                }
+            case "_codecs.encode", "codecs.encode":
+                guard let first = arguments.first, case .string(let text) = first else { return nil }
+                var encoding = "utf-8"
+                if arguments.count > 1, case .string(let label) = arguments[1] {
+                    encoding = label.lowercased()
+                }
+                if encoding == "latin-1" || encoding == "latin1" {
+                    var data = Data()
+                    for scalar in text.unicodeScalars {
+                        guard scalar.value <= 0xFF else { return nil }
+                        data.append(UInt8(scalar.value))
+                    }
+                    return .bytes(data)
+                }
+                return .bytes(Data(text.utf8))
+            default:
+                return nil
             }
         }
 
@@ -403,6 +459,10 @@ enum PickleReader {
         static let binput: UInt8 = 0x71
         static let longBinput: UInt8 = 0x72
         static let memoize: UInt8 = 0x94
+
+        static let globalRef: UInt8 = 0x63
+        static let stackGlobal: UInt8 = 0x93
+        static let reduce: UInt8 = 0x52
     }
 }
 
