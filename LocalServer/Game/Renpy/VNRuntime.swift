@@ -56,31 +56,37 @@ struct VNPlacement: Equatable {
     /// 只认识常见的定位变换；调色、动画类变换（noon、bounce）忽略。
     /// 数值取自游戏的 scripts/system/transforms.rpy。
     static func from(at names: [String]?) -> VNPlacement {
-        guard let first = names?.first(where: { !$0.isEmpty }) else { return .natural }
-        let (name, x, anchor, y) = split(first)
-        var placement: VNPlacement
+        // `at bounce left` 这种先写动画再写位置的，取第一个认得出来的定位变换
+        for text in names ?? [] where !text.isEmpty {
+            let (name, x, anchor, y) = split(text)
+            guard var placement = base(name) else { continue }
+            if let value = x { placement.xpos = value }
+            if let value = anchor { placement.xanchor = value }
+            if let value = y { placement.ypos = value }
+            return placement
+        }
+        return .natural
+    }
+
+    private static func base(_ name: String) -> VNPlacement? {
         switch name {
         case "left":
-            placement = VNPlacement(xpos: 0.22, ypos: -0.04, xanchor: 0.5, yanchor: 0, zoom: 0.75)
+            return VNPlacement(xpos: 0.22, ypos: -0.04, xanchor: 0.5, yanchor: 0, zoom: 0.75)
         case "right":
-            placement = VNPlacement(xpos: 0.78, ypos: -0.04, xanchor: 0.5, yanchor: 0, zoom: 0.75)
+            return VNPlacement(xpos: 0.78, ypos: -0.04, xanchor: 0.5, yanchor: 0, zoom: 0.75)
         case "center":
-            placement = VNPlacement(xpos: 0.5, ypos: -0.04, xanchor: 0.5, yanchor: 0, zoom: 0.75)
+            return VNPlacement(xpos: 0.5, ypos: -0.04, xanchor: 0.5, yanchor: 0, zoom: 0.75)
         case "closeleft":
-            placement = VNPlacement(xpos: 0.22, ypos: -0.1, xanchor: 0.5, yanchor: 0, zoom: 1)
+            return VNPlacement(xpos: 0.22, ypos: -0.1, xanchor: 0.5, yanchor: 0, zoom: 1)
         case "closeright":
-            placement = VNPlacement(xpos: 0.78, ypos: -0.1, xanchor: 0.5, yanchor: 0, zoom: 1)
+            return VNPlacement(xpos: 0.78, ypos: -0.1, xanchor: 0.5, yanchor: 0, zoom: 1)
         case "closecenter":
-            placement = VNPlacement(xpos: 0.5, ypos: -0.1, xanchor: 0.5, yanchor: 0, zoom: 1)
+            return VNPlacement(xpos: 0.5, ypos: -0.1, xanchor: 0.5, yanchor: 0, zoom: 1)
         case "closestleft", "closestcenter", "closestright":
-            placement = VNPlacement(xpos: 0.5, ypos: -0.15, xanchor: 0.5, yanchor: 0, zoom: 1.25)
+            return VNPlacement(xpos: 0.5, ypos: -0.15, xanchor: 0.5, yanchor: 0, zoom: 1.25)
         default:
-            placement = .natural
+            return nil
         }
-        if let value = x { placement.xpos = value }
-        if let value = anchor { placement.xanchor = value }
-        if let value = y { placement.ypos = value }
-        return placement
     }
 
     /// `right(.85)`、`left(xa=-0.7)` → (名字, 位置参数覆盖值)

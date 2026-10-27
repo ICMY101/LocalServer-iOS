@@ -163,6 +163,9 @@ final class RenpyRuntimeTests: XCTestCase {
         let anchored = VNPlacement.from(at: ["left(xa=-0.7)"])
         XCTAssertEqual(anchored.xanchor, -0.7, accuracy: 0.0001)
         XCTAssertEqual(anchored.xpos, 0.22, accuracy: 0.0001, "没给的参数用变换默认值")
+
+        let stacked = VNPlacement.from(at: ["bounce", "right"])
+        XCTAssertEqual(stacked.xpos, 0.78, accuracy: 0.0001, "动画变换在前也要找到后面的定位")
     }
 
     func testShowReplacesSameTagInsteadOfStacking() {

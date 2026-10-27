@@ -240,11 +240,16 @@ final class VNSession: ObservableObject {
             return
         }
         var items: [VNStageItem] = []
+        var visiblePaths: Set<String> = []
         for layer in layerOrder(Array(runtime.layers.keys)) {
             for shown in runtime.layers[layer] ?? [] {
                 // 分层立绘：每个部件都是同一张画布，按声明顺序叠起来
                 if let names = runtime.layeredParts(for: shown.name), !names.isEmpty {
-                    let parts = names.compactMap { image(named: $0) }
+                    let parts = names.compactMap { name -> UIImage? in
+                        guard let path = assets?.imagePath(named: name) else { return nil }
+                        visiblePaths.insert(path)
+                        return image(at: path)
+                    }
                     if !parts.isEmpty {
                         items.append(.sprite(VNSprite(parts: parts,
                                                       placement: VNPlacement.from(at: shown.at))))
@@ -252,6 +257,7 @@ final class VNSession: ObservableObject {
                     }
                 }
                 guard let path = resourcePath(for: shown), let image = image(at: path) else { continue }
+                visiblePaths.insert(path)
                 // 立绘目录里的图按变换摆放；背景、CG 仍然整屏铺满
                 if let assets, assets.isForegroundImage(at: path) {
                     items.append(.sprite(VNSprite(parts: [image],
@@ -262,6 +268,10 @@ final class VNSession: ObservableObject {
             }
         }
         stage = items
+        // 一部游戏几千张图，只留眼下画面上的，否则玩到后面内存撑不住
+        if imageCache.count > visiblePaths.count {
+            imageCache = imageCache.filter { visiblePaths.contains($0.key) }
+        }
     }
 
     /// master 在最底下，其余图层按名字排
@@ -278,11 +288,6 @@ final class VNSession: ObservableObject {
     private func resourcePath(for shown: VNShownImage) -> String? {
         if let resource = shown.resource, let path = assets?.imagePath(named: resource) { return path }
         return assets?.imagePath(named: shown.name)
-    }
-
-    private func image(named name: String) -> UIImage? {
-        guard let path = assets?.imagePath(named: name) else { return nil }
-        return image(at: path)
     }
 
     private func image(at path: String) -> UIImage? {
