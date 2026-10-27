@@ -236,7 +236,8 @@ final class RenpyRuntimeTests: XCTestCase {
                        "新增的 at 字段要跟着存档走")
     }
 
-    func testRestoreRejectsDifferentScript() {        let runtime = VNRuntime(program: compile(Self.script, fingerprint: "A"))
+    func testRestoreRejectsDifferentScript() {
+        let runtime = VNRuntime(program: compile(Self.script, fingerprint: "A"))
         _ = runtime.startNewGame()
         let state = runtime.saveState()
 

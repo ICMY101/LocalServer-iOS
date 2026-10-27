@@ -48,6 +48,7 @@ final class VNSession: ObservableObject {
     @Published private(set) var slots: [VNSaveSlot] = []
     @Published private(set) var history: [VNHistoryEntry] = []
     @Published private(set) var mode: VNPlayMode = .manual
+    @Published private(set) var isPreparing = false
     @Published var notice: String?
 
     private var autoTimer: Timer?
@@ -61,19 +62,33 @@ final class VNSession: ObservableObject {
             failure = "找不到游戏文件，可能已经被移动或删除。"
             return
         }
-        let result = VNGameLibrary.program(for: game, assets: assets)
-        guard let program = result.program, program.startIndex != nil else {
-            failure = result.issues.first ?? "脚本里没有可以开始的地方。"
-            return
+        // 发行包动辄几百个编译脚本，解码要好几秒，放后台做，否则打开播放器像卡死
+        isPreparing = true
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let result = VNGameLibrary.program(for: game, assets: assets)
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.isPreparing = false
+                if let program = result.program, program.startIndex != nil {
+                    self.runtime = VNRuntime(program: program)
+                } else {
+                    self.failure = result.issues.first ?? "脚本里没有可以开始的地方。"
+                }
+                self.runBegin()
+            }
         }
-        runtime = VNRuntime(program: program)
     }
 
     /// 有存档就接着上次，没有就从开头
     func begin() {
         guard !didBegin else { return }
         didBegin = true
-        guard failure == nil, let runtime else { return }
+        runBegin()
+    }
+
+    /// 脚本可能在 `begin()` 之后才编译好，所以两处都会调这里
+    private func runBegin() {
+        guard didBegin, failure == nil, let runtime else { return }
         if let state = saves.newest() {
             if runtime.restore(state) {
                 apply(runtime.outcome, autosave: false)
@@ -304,9 +319,10 @@ struct VNPlayerView: View {
         ZStack {
             Color.black.ignoresSafeArea()
             stageView
+            if session.isPreparing { preparingView }
             VStack(spacing: 0) {
                 Spacer()
-                if let line = session.line, session.choices.isEmpty {
+                if let line = session.line, session.choices.isEmpty, !session.isPreparing {
                     dialogue(line)
                 }
             }
@@ -316,7 +332,9 @@ struct VNPlayerView: View {
             topBar
         }
         .contentShape(Rectangle())
-        .onTapGesture { session.advance() }
+        .onTapGesture {
+            if !session.isPreparing { session.advance() }
+        }
         .statusBarHidden()
         .onAppear { session.begin() }
         .onDisappear { session.stopAudio() }
@@ -371,6 +389,18 @@ struct VNPlayerView: View {
             .clipped()
         }
         .ignoresSafeArea()
+    }
+
+    private var preparingView: some View {
+        VStack(spacing: 10) {
+            ProgressView()
+                .tint(.white)
+            Text("正在读取游戏脚本…")
+                .font(.footnote)
+                .foregroundColor(.white.opacity(0.85))
+        }
+        .padding(22)
+        .background(Color.black.opacity(0.6), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
     }
 
     /// 立绘部件都是同一张画布，叠在同一个框里就自然对齐

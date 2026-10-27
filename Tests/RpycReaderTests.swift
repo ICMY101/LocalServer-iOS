@@ -143,7 +143,8 @@ final class RpycReaderTests: XCTestCase {
     }
 
     /// 容器里的两段都是 zlib 流；解压坏掉时读取会直接返回 nil，先单独验证这一层
-    func testFixtureZlibStreamInflates() throws {        let bytes = try data(RpycFixtures.modern)
+    func testFixtureZlibStreamInflates() throws {
+        let bytes = try data(RpycFixtures.modern)
         func u32(_ offset: Int) -> Int {
             Int(bytes[offset]) | Int(bytes[offset + 1]) << 8
                 | Int(bytes[offset + 2]) << 16 | Int(bytes[offset + 3]) << 24
