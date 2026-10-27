@@ -309,7 +309,9 @@ final class VNEvaluator {
         case "==": return .bool(equal(first, second))
         case "!=": return .bool(!equal(first, second))
         case "<", "<=", ">", ">=": return comparison(first, second, op: op)
-        case "in": return .bool(contains(needle: first, in: second))
+        case "in":
+            guard let result = contains(needle: first, in: second) else { return nil }
+            return .bool(result)
         case "not in":
             guard let result = contains(needle: first, in: second) else { return nil }
             return .bool(!result)
