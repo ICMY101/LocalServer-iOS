@@ -56,10 +56,17 @@ jobs:
             CODE_SIGN_IDENTITY="" \
             build | tee build.log | grep -E "error:|warning: .*LocalServer/|BUILD (SUCCEEDED|FAILED)" || true
           # 编译错误转成 annotation，公开仓库里不登录也能读到具体行
-          grep -E "error: " build.log | head -10 | sed 's/%/%25/g' | while IFS= read -r line; do
+          grep -E "error: " build.log | head -5 | sed 's/%/%25/g' | while IFS= read -r line; do
             echo "::error::$line"
           done
-          test -d build/Build/Products/Release-iphoneos/LocalServer.app
+          if [ ! -d build/Build/Products/Release-iphoneos/LocalServer.app ]; then
+            # 没有 error: 行时（xcodebuild 中途退出等）把日志结尾也报出来，否则失败无从诊断
+            echo "::error::编译没有产出 app，下面是 build.log 结尾"
+            tail -n 9 build.log | sed 's/%/%25/g' | while IFS= read -r line; do
+              echo "::error::$line"
+            done
+            exit 1
+          fi
 
       - name: 打包 IPA
         run: |
