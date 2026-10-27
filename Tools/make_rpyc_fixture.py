@@ -309,8 +309,10 @@ def layered_tree():
         group="face",
         properties={},
         children=[
-            RawAttribute(name="smiling", image="e face smiling",
+            # 真实编译脚本里 image 是 PyExpr，源码带引号
+            RawAttribute(name="smiling", image=PyExpr('"e face smiling"'),
                          properties={"default": True}),
+            # 也有游戏直接存裸名字，两种都要认
             RawAttribute(name="angry", image="e face angry", properties={}),
         ],
     )

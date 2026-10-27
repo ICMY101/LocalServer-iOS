@@ -873,8 +873,8 @@ private struct AstBuilder {
         for child in children {
             switch className(child) {
             case "RawAlways":
-                if let source = text(of: field(child, "image")) {
-                    entries.append(.always(ExpressionParser.parse(source)))
+                if let image = imageExpression(of: field(child, "image")) {
+                    entries.append(.always(image))
                 }
             case "RawAttributeGroup":
                 let groupName = text(of: field(child, "group"))
@@ -901,15 +901,22 @@ private struct AstBuilder {
 
     static func attribute(_ value: PklValue) -> VNLayeredImage.Attribute? {
         guard let name = text(of: field(value, "name")),
-              let source = text(of: field(value, "image")) else { return nil }
+              let image = imageExpression(of: field(value, "image")) else { return nil }
         var isDefault = false
         if let properties = field(value, "properties"),
            let stored = lookup("default", in: properties) {
             if case .bool(let flag) = stored { isDefault = flag }
             if case .int(let number) = stored { isDefault = number != 0 }
         }
-        return VNLayeredImage.Attribute(name: name, image: ExpressionParser.parse(source),
-                                        isDefault: isDefault)
+        return VNLayeredImage.Attribute(name: name, image: image, isDefault: isDefault)
+    }
+
+    /// 立绘部件的图像名：归档里既可能是带引号的表达式，也可能是裸的名字
+    static func imageExpression(of value: PklValue?) -> VNExpr? {
+        guard let source = text(of: value), !source.isEmpty else { return nil }
+        let head = source.first
+        guard head != "\"", head != "'" else { return ExpressionParser.parse(source) }
+        return ExpressionParser.parse("\"\(source)\"")
     }
 
     // MARK: 字段读取
