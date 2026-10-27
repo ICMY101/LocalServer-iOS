@@ -54,7 +54,7 @@ final class RenpyLibraryTests: XCTestCase {
             "game/script.rpy": "image bg room = \"bg/room.png\"\n\nlabel start:\n    scene bg room\n",
             "game/bg/room.png": "not-a-real-png"
         ])
-        XCTAssertNotNil(assets.imageData(named: "bg/room.png"), "定义里写全路径时应该直接命中")
+        XCTAssertNotNil(assets.imagePath(named: "bg/room.png"), "定义里写全路径时应该直接命中")
     }
 
     func testAutomaticImageAndAudioNames() throws {
@@ -66,11 +66,13 @@ final class RenpyLibraryTests: XCTestCase {
         try temp.write("game/audio/bgm/porch_swing_days.ogg", Data([5]))
         let assets = try XCTUnwrap(GameAssets.locate(from: temp.url))
 
-        XCTAssertNotNil(assets.imageData(named: "bg home front night"), "images/bg/home_front_night.webp 应能按自动命名命中")
-        XCTAssertNotNil(assets.imageData(named: "fg hana face smiling"), "多层目录同样要展开成空格名")
+        let room = try XCTUnwrap(assets.imagePath(named: "bg home front night"))
+        XCTAssertFalse(assets.isForegroundImage(at: room), "背景要铺满整屏")
+        let face = try XCTUnwrap(assets.imagePath(named: "fg hana face smiling"))
+        XCTAssertTrue(assets.isForegroundImage(at: face), "fg/ 下的立绘要按变换摆放，不能拉满")
         XCTAssertNotNil(assets.audioData(named: "porch_swing_days"), "裸文件名应能找到 audio/bgm 下的音乐")
         XCTAssertNotNil(assets.audioData(named: "bgm/porch_swing_days"))
-        XCTAssertNil(assets.imageData(named: "bg not here"))
+        XCTAssertNil(assets.imagePath(named: "bg not here"))
     }
 
     func testGameWithOnlyArchiveIsNotPlayable() throws {
