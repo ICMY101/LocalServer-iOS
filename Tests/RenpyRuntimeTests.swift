@@ -153,6 +153,8 @@ final class RenpyRuntimeTests: XCTestCase {
         let runtime = VNRuntime(program: program)
         _ = runtime.startNewGame()
         _ = runtime.advance()
+        _ = runtime.advance()
+        XCTAssertTrue(runtime.awaitingChoice, "脚本走到 menu 时要等玩家选择")
         _ = runtime.choose(at: 0)
         XCTAssertEqual(lineText(runtime.advance()), "你吃了蛋糕，分数是 1。")
 
