@@ -64,6 +64,8 @@ enum Zlib {
                 var idle = 0
 
                 while true {
+                    // 每次都要把写指针放回缓冲区开头，解码器会把它推到已写入的末尾
+                    stream.dst_ptr = outputBase
                     stream.dst_size = chunkSize
                     // 每次都给 FINALIZE，让解码器在数据结束时完成收尾
                     let stepStatus = compression_stream_process(&stream, Int32(COMPRESSION_STREAM_FINALIZE.rawValue))
