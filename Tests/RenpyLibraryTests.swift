@@ -92,6 +92,28 @@ final class RenpyLibraryTests: XCTestCase {
         XCTAssertTrue(VNGameLibrary.games().contains { $0.id == game.id })
     }
 
+    func testSiteGamesAreDiscoveredAndMovedIntoLibrary() throws {
+        let site = try TemporaryDirectory()
+        retained.append(site)
+        try site.write("Gal Site/game/script.rpy", "label start:\n    \"站点游戏\"\n    return\n")
+        try site.write("NotGame/readme.txt", "不是游戏")
+        // 库目录本身不参与发现
+        let library = try TemporaryDirectory()
+        retained.append(library)
+        try library.write("\(VNGameLibrary.rootFolderName)/Kept/game/script.rpy", "label start:\n    return\n")
+
+        let discovered = VNGameLibrary.siteGames(in: site.url)
+        XCTAssertEqual(discovered.map { $0.lastPathComponent }, ["Gal Site"],
+                       "只认有脚本的游戏根目录")
+        guard let found = discovered.first else { return }
+
+        let game = try VNGameLibrary.importFromSite(found)
+        defer { VNGameLibrary.delete(game) }
+        XCTAssertEqual(game.scriptCount, 1)
+        XCTAssertFalse(site.exists("Gal Site/game/script.rpy"), "导入应该把游戏移出站点")
+        XCTAssertTrue(VNGameLibrary.games().contains { $0.id == game.id })
+    }
+
     func testGameWithOnlyArchiveIsNotPlayable() throws {
         let temp = try TemporaryDirectory()
         let empty = temp.url.appendingPathComponent("empty", isDirectory: true)

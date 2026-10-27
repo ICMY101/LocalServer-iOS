@@ -71,6 +71,54 @@ enum VNGameLibrary {
         return GameAssets.locate(from: folder)
     }
 
+    /// www 站点里发现的游戏文件夹（不含库目录本身）。
+    /// 网页端上传 zip 并勾选解压后，游戏就落在站点里，这里负责把它们找出来。
+    static func siteGames(in root: URL = FileStore.rootURL) -> [URL] {
+        let manager = FileManager.default
+        var found: [URL] = []
+        var frontier = [root]
+        var depth = 0
+        while !frontier.isEmpty, depth < 3 {
+            var next: [URL] = []
+            for folder in frontier {
+                let children = (try? manager.contentsOfDirectory(
+                    at: folder, includingPropertiesForKeys: [.isDirectoryKey],
+                    options: [.skipsHiddenFiles])) ?? []
+                for child in children {
+                    guard (try? child.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true,
+                          child.lastPathComponent != rootFolderName else { continue }
+                    if isGameRoot(child) {
+                        found.append(child)
+                    } else {
+                        next.append(child)
+                    }
+                }
+            }
+            frontier = next
+            depth += 1
+        }
+        return found.sorted {
+            $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending
+        }
+    }
+
+    /// 把站点里的游戏挪进库：同一块盘上 rename 瞬间完成；挪不动（跨卷等）就逐文件复制
+    static func importFromSite(_ url: URL) throws -> VNGame {
+        let target = availableFolder(named: url.lastPathComponent)
+        do {
+            try FileManager.default.moveItem(at: url, to: target)
+        } catch {
+            try copyRecursively(from: url, to: target)
+            try? FileManager.default.removeItem(at: url)
+        }
+        guard let assets = GameAssets.locate(from: target) else { throw VNGameError.noScripts }
+        return VNGame(id: target.lastPathComponent,
+                      title: target.lastPathComponent,
+                      folder: assets.root,
+                      scriptCount: scriptCount(in: assets),
+                      archiveCount: assets.archiveCount)
+    }
+
     /// 所有脚本解析、编译成一份程序：源码里有 start 就优先用源码，否则读编译脚本。
     /// 不少发行包只留一两个 .rpy 配置脚本，剧情全在 .rpyc 里，不能让它挡住编译脚本。
     /// 文件名参与指纹，重命名或改脚本都会让旧存档失效。

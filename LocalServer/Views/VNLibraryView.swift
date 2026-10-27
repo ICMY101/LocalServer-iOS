@@ -4,6 +4,7 @@ import UniformTypeIdentifiers
 /// 游戏库：导入压缩包、列出可运行的游戏、进入播放器
 struct VNLibraryView: View {
     @State private var games: [VNGame] = []
+    @State private var siteGames: [URL] = []
     @State private var isImporting = false
     @State private var isWorking = false
     @State private var playing: VNGame?
@@ -69,7 +70,7 @@ struct VNLibraryView: View {
             IconBadge(systemName: "text.book.closed.fill", color: Theme.accent, size: 56)
             Text("还没有游戏")
                 .font(.title3.weight(.semibold))
-            Text("点右上角“+”，选择 Ren'Py 游戏的 .zip 或文件夹。\n导入后会自动解压、识别脚本，然后就能直接玩。")
+            Text("点右上角“+”，选择 Ren'Py 游戏的 .zip 或文件夹。\n也可以在电脑浏览器打开本机网页上传游戏压缩包（勾选“解压”），上传完回到这里。")
                 .font(.footnote)
                 .foregroundColor(.secondary)
                 .multilineTextAlignment(.center)
@@ -101,6 +102,32 @@ struct VNLibraryView: View {
                 Text("\(games.count) 部游戏")
             } footer: {
                 Text("游戏文件放在“文件 › \(VNGameLibrary.rootFolderName)”。只有 .rpa 归档、没有脚本的游戏暂时无法运行。")
+            }
+
+            if !siteGames.isEmpty {
+                Section {
+                    ForEach(siteGames, id: \.absoluteString) { url in
+                        HStack(spacing: 12) {
+                            IconBadge(systemName: "tray.and.arrow.down.fill", color: Theme.accent)
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text(url.lastPathComponent)
+                                    .font(.body.weight(.medium))
+                                Text("网页上传的游戏，导入后才能进播放器")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
+                            Spacer()
+                            Button("导入") { importFromSite(url) }
+                                .buttonStyle(.borderedProminent)
+                                .disabled(isWorking)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                } header: {
+                    Text("站点里发现的游戏")
+                } footer: {
+                    Text("在电脑浏览器打开本机网页，把游戏 zip 上传并勾选“解压”，上传完回到这里点“导入”。")
+                }
             }
 
             Section {
@@ -144,6 +171,27 @@ struct VNLibraryView: View {
 
     private func reload() {
         games = VNGameLibrary.games()
+        siteGames = VNGameLibrary.siteGames()
+    }
+
+    /// 站点里解压好的游戏移进库；同一块盘上就是改名，秒完成
+    private func importFromSite(_ url: URL) {
+        isWorking = true
+        DispatchQueue.global(qos: .userInitiated).async {
+            do {
+                let game = try VNGameLibrary.importFromSite(url)
+                DispatchQueue.main.async {
+                    isWorking = false
+                    reload()
+                    message = "已导入《\(game.title)》"
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    isWorking = false
+                    message = error.localizedDescription
+                }
+            }
+        }
     }
 
     private func delete(_ game: VNGame) {
