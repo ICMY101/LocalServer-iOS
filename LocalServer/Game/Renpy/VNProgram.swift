@@ -121,9 +121,9 @@ struct VNCompiler {
         for statement in statements {
             switch statement {
             case .label(let name, let parameters, let body):
+                // 标签正文走到头会自然接上下一个标签，和 Ren'Py 一样，不额外补 return
                 startLabel(name: name, parameters: parameters)
                 emit(body)
-                ops.append(.returnFromCall)
             case .define(let name, let value):
                 initOps.append(.assign(name, value))
             case .defaultVariable(let name, let value):
