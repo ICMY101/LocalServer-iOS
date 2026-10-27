@@ -80,7 +80,7 @@ private enum Inflate {
         guard output.count + length <= maxOutput else { return false }
         for _ in 0..<length {
             guard let byte = bits.byte() else { return false }
-            output.append(byte)
+            output.append(UInt8(byte))
         }
         return true
     }
