@@ -143,6 +143,8 @@ final class GameAssets {
         let lowered = normalized(name)
         for directory in Self.imageDirectories {
             let base = directory.isEmpty ? lowered : directory + lowered
+            // `image bg room = "bg/room.png"` 这种已经带扩展名的路径直接读
+            if hasImageExtension(base), let data = read(base) { return data }
             for ext in Self.imageExtensions {
                 if let data = read(base + "." + ext) { return data }
             }
@@ -153,6 +155,10 @@ final class GameAssets {
             if let data = read(underscored + "." + ext) { return data }
         }
         return nil
+    }
+
+    private func hasImageExtension(_ name: String) -> Bool {
+        Self.imageExtensions.contains { name.hasSuffix("." + $0) }
     }
 
     private static let audioExtensions = ["ogg", "oga", "mp3", "wav", "m4a"]

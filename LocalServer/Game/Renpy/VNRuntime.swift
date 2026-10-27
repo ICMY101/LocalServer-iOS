@@ -61,6 +61,8 @@ struct VNSaveState: Codable {
     var line: VNLine?
     /// 存档点所在的标签，列表里给人看的
     var label: String?
+    /// 最近一句台词，用作存档预览
+    var preview: String?
     var savedAt: Date
 
     static func decode(_ data: Data) throws -> VNSaveState {
@@ -357,6 +359,7 @@ final class VNRuntime {
                     callStack: callStack,
                     line: lastLine,
                     label: currentLabel,
+                    preview: preview,
                     savedAt: Date())
     }
 
