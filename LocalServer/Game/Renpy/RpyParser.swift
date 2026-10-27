@@ -408,7 +408,10 @@ struct RpyParser {
         _ = scanner.keyword("with")
         _ = scanner.upToClause()
         if scanner.match(":") { skipChildBlock(parentIndent: line.indent) }
-        return [.show(name: specifier.name, expression: specifier.expression, layer: specifier.layer)]
+        return [.show(name: specifier.name,
+                      expression: specifier.expression,
+                      layer: specifier.layer,
+                      at: specifier.at)]
     }
 
     private mutating func parseHide(_ scanner: inout LineScanner, line: LogicalLine) -> [VNStmt] {
@@ -558,11 +561,13 @@ struct RpyParser {
     }
 
     /// `show/scene/hide` 后的图像名，以及 `expression`、`onlayer`、`at` 等子句
-    private func imageSpecifier(_ scanner: inout LineScanner) -> (name: String, expression: VNExpr?, layer: String) {
+    private func imageSpecifier(_ scanner: inout LineScanner)
+        -> (name: String, expression: VNExpr?, layer: String, at: [String]) {
         var layer = "master"
+        var at: [String] = []
         if scanner.keyword("expression") || scanner.keyword("image") {
             let source = scanner.upToClause()
-            return (source, ExpressionParser.parse(source), layer)
+            return (source, ExpressionParser.parse(source), layer, at)
         }
 
         var components: [String] = []
@@ -575,7 +580,11 @@ struct RpyParser {
                 layer = scanner.word() ?? layer
                 continue
             }
-            if scanner.keyword("at") || scanner.keyword("zorder") || scanner.keyword("behind") {
+            if scanner.keyword("at") {
+                at = RpyParser.transformNames(scanner.upToClause())
+                continue
+            }
+            if scanner.keyword("zorder") || scanner.keyword("behind") {
                 _ = scanner.upToClause()
                 continue
             }
@@ -585,7 +594,26 @@ struct RpyParser {
             }
             break
         }
-        return (components.joined(separator: " "), nil, layer)
+        return (components.joined(separator: " "), nil, layer, at)
+    }
+
+    /// `left right(.85) center` —— 按顶层空格切开，括号里的空格不算分隔
+    static func transformNames(_ text: String) -> [String] {
+        var names: [String] = []
+        var current = ""
+        var depth = 0
+        for character in text {
+            if character == "(" || character == "[" { depth += 1 }
+            if character == ")" || character == "]" { depth -= 1 }
+            if character == " ", depth == 0 {
+                if !current.isEmpty { names.append(current) }
+                current = ""
+                continue
+            }
+            current.append(character)
+        }
+        if !current.isEmpty { names.append(current) }
+        return names
     }
 }
 

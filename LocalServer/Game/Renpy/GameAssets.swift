@@ -160,13 +160,18 @@ final class GameAssets {
     /// 一个图片文件可能对应的名字：
     /// 1. 路径里的 `/` 和下划线都当空格（Ren'Py 自动图片的通用规则）；
     /// 2. `cg-08-05-report_ashamed` 这类 CG 文件名，游戏自己的脚本会注册成
-    ///    `cg report ashamed`（去掉编号，只留前缀和标题）。
+    ///    `cg report ashamed`（去掉编号，只留前缀和标题）；
+    /// 3. 立绘部件和叠加层按去掉 `fg/`、`overlay/` 目录的名字引用：
+    ///    `images/fg/hana/body_base.webp` 就是 `hana body base`。
     private static func automaticNames(_ stem: String) -> [String] {
         var names = [spaceName(stem)]
         let file = stem.split(separator: "/").last.map(String.init) ?? stem
         let parts = file.split(separator: "-", omittingEmptySubsequences: false)
         if parts.count == 4 {
             names.append(spaceName(String(parts[0]) + " " + String(parts[3])))
+        }
+        for prefix in ["fg/", "overlay/"] where stem.hasPrefix(prefix) {
+            names.append(spaceName(String(stem.dropFirst(prefix.count))))
         }
         return names
     }

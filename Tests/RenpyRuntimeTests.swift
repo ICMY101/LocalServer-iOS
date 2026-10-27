@@ -144,6 +144,25 @@ final class RenpyRuntimeTests: XCTestCase {
         _ = runtime.startNewGame()
         XCTAssertEqual(runtime.layers["master"]?.first?.resource, "bg/park.jpg")
         XCTAssertEqual(runtime.layers["master"]?.last?.name, "e smile")
+        XCTAssertEqual(runtime.layers["master"]?.last?.at, ["left"])
+    }
+
+    // MARK: - 定位
+
+    func testAtTransformsMapToPlacement() {
+        XCTAssertEqual(VNPlacement.from(at: nil), .natural)
+        XCTAssertEqual(VNPlacement.from(at: ["noon"]), .natural, "不认识的变换保持原样")
+
+        let left = VNPlacement.from(at: ["left"])
+        XCTAssertEqual(left.xpos, 0.22, accuracy: 0.0001)
+        XCTAssertEqual(left.xanchor, 0.5, accuracy: 0.0001)
+        XCTAssertEqual(left.zoom, 0.75, accuracy: 0.0001)
+
+        XCTAssertEqual(VNPlacement.from(at: ["right(.85)"]).xpos, 0.85, accuracy: 0.0001)
+
+        let anchored = VNPlacement.from(at: ["left(xa=-0.7)"])
+        XCTAssertEqual(anchored.xanchor, -0.7, accuracy: 0.0001)
+        XCTAssertEqual(anchored.xpos, 0.22, accuracy: 0.0001, "没给的参数用变换默认值")
     }
 
     func testShowReplacesSameTagInsteadOfStacking() {
@@ -202,8 +221,22 @@ final class RenpyRuntimeTests: XCTestCase {
         XCTAssertEqual(restored.layers["master"]?.count, 2)
     }
 
-    func testRestoreRejectsDifferentScript() {
-        let runtime = VNRuntime(program: compile(Self.script, fingerprint: "A"))
+    func testShowPositionSurvivesSaveAndLoad() throws {
+        let program = compile("""
+        label start:
+            show hana at right
+            "站在右边"
+        """, fingerprint: "定位存档")
+        let runtime = VNRuntime(program: program)
+        _ = runtime.startNewGame()
+
+        let restored = VNRuntime(program: program)
+        XCTAssertTrue(restored.restore(try VNSaveState.decode(runtime.saveState().encoded())))
+        XCTAssertEqual(restored.layers["master"]?.first?.at, ["right"],
+                       "新增的 at 字段要跟着存档走")
+    }
+
+    func testRestoreRejectsDifferentScript() {        let runtime = VNRuntime(program: compile(Self.script, fingerprint: "A"))
         _ = runtime.startNewGame()
         let state = runtime.saveState()
 

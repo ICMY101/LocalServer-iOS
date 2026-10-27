@@ -119,8 +119,11 @@ indirect enum VNStmt {
     case returnStatement
 
     case scene(name: String?, layer: String)
-    case show(name: String, expression: VNExpr?, layer: String)
+    /// `at` 是定位变换的名字（`left`、`right(.85)`），运行和显示时再解释
+    case show(name: String, expression: VNExpr?, layer: String, at: [String])
     case hide(name: String, layer: String)
+    /// `layeredimage hana:`：由固定部件和可选属性组拼出来的立绘
+    case layeredImage(VNLayeredImage)
     case image(definition: [VNValue], expression: VNExpr)
     case play(channel: String, file: VNExpr?, volume: Double, loop: Bool)
     case stop(channel: String)
@@ -134,6 +137,31 @@ indirect enum VNStmt {
     case ignored(String)
     /// 走到这里说明脚本结构不认识，运行时应报错而不是静默跳过
     case unknown(line: String)
+}
+
+/// `layeredimage` 定义。渲染顺序就是声明顺序：`always` 层和属性组交错叠加，
+/// `show hana angry` 只替换 face 组的那一层，其余组沿用默认属性。
+struct VNLayeredImage {
+    struct Attribute {
+        var name: String
+        var image: VNExpr
+        var isDefault: Bool
+    }
+
+    struct Group {
+        var name: String
+        var attributes: [Attribute]
+    }
+
+    enum Entry {
+        /// 无条件叠加的部件
+        case always(VNExpr)
+        /// 同一时刻只会选中一个属性的部件组
+        case group(Group)
+    }
+
+    var name: String
+    var entries: [Entry]
 }
 
 struct VNMenuItem {

@@ -33,6 +33,8 @@ renpy_pkg = module("renpy")
 ast_mod = module("renpy.ast")
 astsupport_mod = module("renpy.astsupport")
 parameter_mod = module("renpy.parameter")
+store_pkg = module("store")
+layeredimage_mod = module("store.layeredimage")
 
 
 def register(mod, cls, name=None):
@@ -158,6 +160,18 @@ for cls in (Label, Say, TranslateSay, Menu, Jump, Call, Return, If, While,
             Scene, Show, Hide, Image, Define, Default, Init, Python,
             UserStatement, Translate, EndTranslate, With, Screen):
     register(ast_mod, cls)
+
+
+# layeredimage 的自定义语句把解析结果（Raw* 对象）直接放进 UserStatement.parsed，
+# 编译脚本里因此会出现 store.layeredimage 的类
+class RawLayeredImage(Object): pass
+class RawAlways(Object): pass
+class RawAttributeGroup(Object): pass
+class RawAttribute(Object): pass
+
+
+for cls in (RawLayeredImage, RawAlways, RawAttributeGroup, RawAttribute):
+    register(layeredimage_mod, cls)
 
 
 # ---------------------------------------------------------------------------
@@ -288,6 +302,46 @@ def dynamic_tree():
     ]
 
 
+def layered_tree():
+    """`layeredimage e:`：always 部件 + face 属性组，后面用 `at left` 摆位置。"""
+    face = RawAttributeGroup(
+        image_name="e",
+        group="face",
+        properties={},
+        children=[
+            RawAttribute(name="smiling", image="e face smiling",
+                         properties={"default": True}),
+            RawAttribute(name="angry", image="e face angry", properties={}),
+        ],
+    )
+    image = RawLayeredImage(
+        name="e",
+        children=[
+            # FG_CEN 是游戏自己的常量，玩家端求不出来，只能退回字符串字面量
+            RawAlways(image=PyExpr('"e body base" + FG_CEN'), properties={}),
+            face,
+        ],
+        properties={},
+    )
+    return [
+        Define(store="store", varname="e", index=None, operator="=",
+               code=PyCode('Character("艾莉")')),
+        Init(block=[Image(imgname=("bg", "room"), code=PyCode('"bg/room.png"'), atl=None)],
+             priority=500),
+        UserStatement(line="layeredimage e:", block=None,
+                      parsed=(("layeredimage",), image)),
+        Label(_name="start", block=[
+            Scene(imspec=(("bg", "room"), [], "master"), layer="master"),
+            Show(imspec=(("e",), None, None, ["left"], "master", None)),
+            say("e", "第一句"),
+            # 只换表情、不写 at：位置必须沿用上一次的 left
+            Show(imspec=(("e", "angry"), None, None, [], "master", None)),
+            say("e", "第二句"),
+            Return(expression=None),
+        ], parameters=None, hide=False),
+    ]
+
+
 # ---------------------------------------------------------------------------
 # 容器
 # ---------------------------------------------------------------------------
@@ -387,9 +441,10 @@ def main():
     both = rpc4({1: packed(base_tree()), 2: packed(slot_two_tree())})
     slot_two = rpc4({2: packed(slot_two_tree())})
     dynamic = rpc4({1: packed(dynamic_tree())})
+    layered = rpc4({1: packed(layered_tree())})
     legacy = packed(base_tree())
 
-    for blob in (both, slot_two, dynamic):
+    for blob in (both, slot_two, dynamic, layered):
         check_round_trip(blob)
     data, tree = pickle.loads(zlib.decompress(legacy))
     assert data == DATA and tree
@@ -398,6 +453,7 @@ def main():
         ("modern", "双槽容器：槽 1 是原始语法树，槽 2 带 Translate 包装", both),
         ("slotTwoOnly", "只有槽 2，台词都在 TranslateSay 里，另有必须跳过的日文翻译块", slot_two),
         ("dynamicJump", "start 用 jump expression 选章节", dynamic),
+        ("layered", "分层立绘：always 部件加 face 属性组，show 带 at 定位", layered),
         ("legacy", "旧格式：整份文件就是一个 zlib 压缩的 pickle", legacy),
     ]
 

@@ -842,6 +842,13 @@ private struct AstBuilder {
               !line.isEmpty else { return [] }
         let keyword = line.split(whereSeparator: { $0 == " " || $0 == "\t" }).first
             .map { String($0).lowercased() } ?? ""
+        if keyword == "layeredimage" {
+            guard let image = Self.layeredImage(value) else {
+                warnings.append("无法解析分层立绘：\(line)")
+                return [.ignored(line)]
+            }
+            return [.layeredImage(image)]
+        }
         // 只重放音频/暂停这类能确定语义的语句，别的语句跳过但留下诊断
         guard ["play", "stop", "voice", "pause"].contains(keyword) else {
             warnings.append("忽略语句：\(line)")
@@ -855,10 +862,65 @@ private struct AstBuilder {
         return parsed
     }
 
+    /// `layeredimage hana:`：parsed 的第二项是 RawLayeredImage，children 按声明顺序排列
+    static func layeredImage(_ value: PklValue) -> VNLayeredImage? {
+        guard case .array(let parsed)? = field(value, "parsed"), parsed.count >= 2,
+              className(parsed[1]) == "RawLayeredImage",
+              let name = text(of: field(parsed[1], "name")),
+              case .array(let children)? = field(parsed[1], "children") else { return nil }
+
+        var entries: [VNLayeredImage.Entry] = []
+        for child in children {
+            switch className(child) {
+            case "RawAlways":
+                if let source = text(of: field(child, "image")) {
+                    entries.append(.always(ExpressionParser.parse(source)))
+                }
+            case "RawAttributeGroup":
+                let groupName = text(of: field(child, "group"))
+                    ?? text(of: field(child, "image_name")) ?? "group"
+                let groupAttributes = attributes(of: child)
+                guard !groupAttributes.isEmpty else { continue }
+                entries.append(.group(VNLayeredImage.Group(name: groupName, attributes: groupAttributes)))
+            case "RawAttribute":
+                // 没写 group 的属性自成一组
+                if let attribute = attribute(child) {
+                    entries.append(.group(VNLayeredImage.Group(name: attribute.name, attributes: [attribute])))
+                }
+            default:
+                break
+            }
+        }
+        return VNLayeredImage(name: name, entries: entries)
+    }
+
+    static func attributes(of group: PklValue) -> [VNLayeredImage.Attribute] {
+        guard case .array(let children)? = field(group, "children") else { return [] }
+        return children.compactMap { attribute($0) }
+    }
+
+    static func attribute(_ value: PklValue) -> VNLayeredImage.Attribute? {
+        guard let name = text(of: field(value, "name")),
+              let source = text(of: field(value, "image")) else { return nil }
+        var isDefault = false
+        if let properties = field(value, "properties"),
+           let stored = lookup("default", in: properties) {
+            if case .bool(let flag) = stored { isDefault = flag }
+            if case .int(let number) = stored { isDefault = number != 0 }
+        }
+        return VNLayeredImage.Attribute(name: name, image: ExpressionParser.parse(source),
+                                        isDefault: isDefault)
+    }
+
     // MARK: 字段读取
 
     static func shortName(_ className: String) -> String? {
         className.split(separator: ".").last.map(String.init)
+    }
+
+    static func className(_ value: PklValue) -> String? {
+        guard case .object(let object) = value else { return nil }
+        return shortName(object.className)
     }
 
     static func field(_ value: PklValue, _ key: String) -> PklValue? {
@@ -1002,12 +1064,13 @@ private struct AstBuilder {
     }
 
     /// imspec：3 元组 (图像名, at 列表, 层) 或 6/7 元组 (图像名, expression, tag, at, 层, zorder[, behind])
-    static func imageSpec(_ value: PklValue?) -> (name: String, expression: String?, layer: String?)? {
+    static func imageSpec(_ value: PklValue?)
+        -> (name: String, expression: String?, layer: String?, at: [String])? {
         guard let value, case .array(let parts) = value, parts.count >= 3 else { return nil }
         if parts.count >= 6 {
-            return (imageName(parts[0]), text(of: parts[1]), text(of: parts[4]))
+            return (imageName(parts[0]), text(of: parts[1]), text(of: parts[4]), strings(parts[3]))
         }
-        return (imageName(parts[0]), nil, text(of: parts[2]))
+        return (imageName(parts[0]), nil, text(of: parts[2]), strings(parts[1]))
     }
 
     /// PyCode 的状态是 (版本, 源码, 位置, 模式, py, hash, 列)；老版本可能是字典
@@ -1049,7 +1112,8 @@ private struct AstBuilder {
             expression = ExpressionParser.parse(source)
         }
         guard !name.isEmpty else { return [] }
-        return [.show(name: name, expression: expression, layer: spec.layer ?? "master")]
+        return [.show(name: name, expression: expression,
+                      layer: spec.layer ?? "master", at: spec.at)]
     }
 
     static func hide(_ value: PklValue) -> [VNStmt] {

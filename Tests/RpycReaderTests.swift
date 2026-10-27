@@ -119,9 +119,31 @@ final class RpycReaderTests: XCTestCase {
         }
     }
 
+    func testLayeredImagePicksDefaultAttributeAndKeepsPlacement() throws {
+        let program = try program(from: RpycFixtures.layered)
+        XCTAssertFalse(program.warnings.contains { $0.contains("分层立绘") },
+                       "夹具里的 layeredimage 应该能解析")
+
+        let runtime = VNRuntime(program: program)
+        guard case .line(let first) = runtime.startNewGame() else {
+            return XCTFail("应该先显示分层立绘那句")
+        }
+        XCTAssertEqual(first.text, "第一句")
+        XCTAssertEqual(runtime.layeredParts(for: "e"), ["e body base", "e face smiling"],
+                       "always 部件在前，没属性时用默认的 face")
+        XCTAssertEqual(runtime.layers["master"]?.first { $0.tag == "e" }?.at, ["left"])
+
+        guard case .line(let second) = runtime.advance() else {
+            return XCTFail("换表情后应该继续念第二句")
+        }
+        XCTAssertEqual(second.text, "第二句")
+        XCTAssertEqual(runtime.layeredParts(for: "e angry"), ["e body base", "e face angry"])
+        XCTAssertEqual(runtime.layers["master"]?.first { $0.tag == "e" }?.at, ["left"],
+                       "只换表情的 show 要沿用上次的 at")
+    }
+
     /// 容器里的两段都是 zlib 流；解压坏掉时读取会直接返回 nil，先单独验证这一层
-    func testFixtureZlibStreamInflates() throws {
-        let bytes = try data(RpycFixtures.modern)
+    func testFixtureZlibStreamInflates() throws {        let bytes = try data(RpycFixtures.modern)
         func u32(_ offset: Int) -> Int {
             Int(bytes[offset]) | Int(bytes[offset + 1]) << 8
                 | Int(bytes[offset + 2]) << 16 | Int(bytes[offset + 3]) << 24

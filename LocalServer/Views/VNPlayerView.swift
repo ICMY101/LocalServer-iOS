@@ -1,6 +1,17 @@
 import SwiftUI
 import UIKit
 
+/// 舞台上的一个元素：背景整屏铺满，立绘按放置参数摆放
+enum VNStageItem {
+    case background(UIImage)
+    case sprite(VNSprite)
+}
+
+struct VNSprite {
+    var parts: [UIImage]
+    var placement: VNPlacement
+}
+
 /// 播放器的全部状态。界面只读这些字段，所有推进逻辑都在这里。
 final class VNSession: ObservableObject {
     let game: VNGame
@@ -14,7 +25,7 @@ final class VNSession: ObservableObject {
     @Published private(set) var line: VNLine?
     @Published private(set) var menuTitle: String?
     @Published private(set) var choices: [VNChoice] = []
-    @Published private(set) var background: [UIImage] = []
+    @Published private(set) var stage: [VNStageItem] = []
     @Published private(set) var speakerColor: Color?
     @Published private(set) var failure: String?
     @Published private(set) var isFinished = false
@@ -136,25 +147,34 @@ final class VNSession: ObservableObject {
             choices = []
         }
 
-        refreshBackground()
+        refreshStage()
         if let runtime { audio.update(tracks: runtime.tracks, assets: assets) }
         if autosave, failure == nil, !isFinished, let runtime {
             try? saves.write(runtime.saveState(), slot: VNSaveSlot.autoID)
         }
     }
 
-    private func refreshBackground() {
+    private func refreshStage() {
         guard let runtime else {
-            background = []
+            stage = []
             return
         }
-        var images: [UIImage] = []
+        var items: [VNStageItem] = []
         for layer in layerOrder(Array(runtime.layers.keys)) {
             for shown in runtime.layers[layer] ?? [] {
-                if let image = image(for: shown) { images.append(image) }
+                // 分层立绘：每个部件都是同一张画布，按声明顺序叠起来
+                if let names = runtime.layeredParts(for: shown.name), !names.isEmpty {
+                    let parts = names.compactMap { image(named: $0) }
+                    if !parts.isEmpty {
+                        items.append(.sprite(VNSprite(parts: parts,
+                                                      placement: VNPlacement.from(at: shown.at))))
+                        continue
+                    }
+                }
+                if let image = image(for: shown) { items.append(.background(image)) }
             }
         }
-        background = images
+        stage = items
     }
 
     /// master 在最底下，其余图层按名字排
@@ -168,18 +188,17 @@ final class VNSession: ObservableObject {
     }
 
     private func image(for shown: VNShownImage) -> UIImage? {
-        let key = shown.resource ?? shown.name
-        if let cached = imageCache[key] { return cached }
-        var names: [String] = []
-        if let resource = shown.resource { names.append(resource) }
-        names.append(shown.name)
-        for name in names {
-            if let data = assets?.imageData(named: name), let image = UIImage(data: data) {
-                imageCache[key] = image
-                return image
-            }
+        if let resource = shown.resource, let image = image(named: resource) { return image }
+        return image(named: shown.name)
+    }
+
+    private func image(named name: String) -> UIImage? {
+        if let cached = imageCache[name] { return cached }
+        guard let data = assets?.imageData(named: name), let image = UIImage(data: data) else {
+            return nil
         }
-        return nil
+        imageCache[name] = image
+        return image
     }
 
     private func color(for speaker: String?) -> Color? {
@@ -205,7 +224,7 @@ struct VNPlayerView: View {
     var body: some View {
         ZStack {
             Color.black.ignoresSafeArea()
-            background
+            stageView
             VStack(spacing: 0) {
                 Spacer()
                 if let line = session.line, session.choices.isEmpty {
@@ -233,17 +252,66 @@ struct VNPlayerView: View {
         }
     }
 
-    private var background: some View {
-        ZStack {
-            ForEach(Array(session.background.enumerated()), id: \.offset) { item in
-                Image(uiImage: item.element)
-                    .resizable()
-                    .scaledToFill()
+    /// 游戏自己的画面尺寸：取正在显示的第一张背景图，立绘按它的比例摆放
+    private var baseSize: CGSize {
+        for item in session.stage {
+            if case .background(let image) = item, image.size.width > 0, image.size.height > 0 {
+                return image.size
             }
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .clipped()
+        return CGSize(width: 800, height: 600)
+    }
+
+    private var stageView: some View {
+        GeometryReader { geometry in
+            let base = baseSize
+            let cover = max(geometry.size.width / base.width, geometry.size.height / base.height)
+            let screenWidth = base.width * cover
+            let screenHeight = base.height * cover
+            let originX = (geometry.size.width - screenWidth) / 2
+            let originY = (geometry.size.height - screenHeight) / 2
+            ZStack {
+                ForEach(Array(session.stage.enumerated()), id: \.offset) { item in
+                    switch item.element {
+                    case .background(let image):
+                        Image(uiImage: image)
+                            .resizable()
+                            .scaledToFill()
+                            .frame(width: geometry.size.width, height: geometry.size.height)
+                            .clipped()
+                    case .sprite(let sprite):
+                        spriteView(sprite,
+                                   originX: originX, originY: originY,
+                                   screenWidth: screenWidth, screenHeight: screenHeight,
+                                   cover: cover)
+                    }
+                }
+            }
+            .frame(width: geometry.size.width, height: geometry.size.height)
+            .clipped()
+        }
         .ignoresSafeArea()
+    }
+
+    /// 立绘部件都是同一张画布，叠在同一个框里就自然对齐
+    private func spriteView(_ sprite: VNSprite, originX: CGFloat, originY: CGFloat,
+                            screenWidth: CGFloat, screenHeight: CGFloat, cover: CGFloat) -> some View {
+        let native = sprite.parts[0].size
+        let width = native.width * CGFloat(sprite.placement.zoom) * cover
+        let height = native.height * CGFloat(sprite.placement.zoom) * cover
+        let x = originX + CGFloat(sprite.placement.xpos) * screenWidth
+            - CGFloat(sprite.placement.xanchor) * width + width / 2
+        let y = originY + CGFloat(sprite.placement.ypos) * screenHeight
+            - CGFloat(sprite.placement.yanchor) * height + height / 2
+        return ZStack {
+            ForEach(Array(sprite.parts.enumerated()), id: \.offset) { part in
+                Image(uiImage: part.element)
+                    .resizable()
+                    .frame(width: width, height: height)
+            }
+        }
+        .frame(width: width, height: height)
+        .position(x: x, y: y)
     }
 
     private func dialogue(_ line: VNLine) -> some View {

@@ -28,7 +28,7 @@ enum VNOp {
     /// `image bg room = "room.png"`
     case image(name: String, expression: VNExpr)
     case scene(name: String?, layer: String)
-    case show(name: String, expression: VNExpr?, layer: String)
+    case show(name: String, expression: VNExpr?, layer: String, at: [String])
     case hide(name: String, layer: String)
     case play(channel: String, file: VNExpr?, volume: Double, loop: Bool)
     case stop(channel: String)
@@ -53,20 +53,30 @@ struct VNProgram {
     let warnings: [String]
     /// 脚本指纹：存档记录它，读档时不一致就拒绝，避免跳错位置
     let fingerprint: String
+    /// 分层立绘：图像标签（第一个词）→ 定义
+    let layeredImages: [String: VNLayeredImage]
 
     private let labelIndex: [String: Int]
 
-    init(initOps: [VNOp], ops: [VNOp], labels: [VNLabel], warnings: [String] = [], fingerprint: String = "") {
+    init(initOps: [VNOp], ops: [VNOp], labels: [VNLabel], warnings: [String] = [],
+         fingerprint: String = "", layeredImages: [String: VNLayeredImage] = [:]) {
         self.initOps = initOps
         self.ops = ops
         self.labels = labels
         self.warnings = warnings
         self.fingerprint = fingerprint
+        self.layeredImages = layeredImages
         self.labelIndex = Dictionary(labels.map { ($0.name, $0.index) }, uniquingKeysWith: { first, _ in first })
     }
 
     func index(ofLabel name: String) -> Int? {
         labelIndex[name]
+    }
+
+    /// `show hana angry` 用第一个词找分层立绘定义
+    func layeredImage(named name: String) -> VNLayeredImage? {
+        let tag = VNShownImage.tag(of: name).lowercased()
+        return layeredImages[tag]
     }
 
     /// pc 落在哪个标签里，存档列表显示用
@@ -93,6 +103,7 @@ struct VNCompiler {
     private var labels: [VNLabel] = []
     private var patches: [Patch] = []
     private var warnings: [String] = []
+    private var layeredImages: [String: VNLayeredImage] = [:]
     /// 正在编译的标签，动态跳转选兜底标签时用来排除自己
     private var currentLabel: String?
 
@@ -118,7 +129,8 @@ struct VNCompiler {
                          ops: ops,
                          labels: compiler.labels,
                          warnings: compiler.warnings,
-                         fingerprint: fingerprint)
+                         fingerprint: fingerprint,
+                         layeredImages: compiler.layeredImages)
     }
 
     // MARK: - 顶层
@@ -136,6 +148,9 @@ struct VNCompiler {
                 initOps.append(.initialize(name, value))
             case .image(let definition, let expression):
                 initOps.append(imageOp(definition: definition, expression: expression))
+            case .layeredImage(let image):
+                // 定义只在编译期使用，运行时按属性拼部件
+                layeredImages[image.name.lowercased()] = image
             case .ignored(let reason):
                 warnings.append(reason)
             default:
@@ -193,12 +208,14 @@ struct VNCompiler {
             ops.append(.expression(value))
         case .scene(let name, let layer):
             ops.append(.scene(name: name, layer: layer))
-        case .show(let name, let expression, let layer):
-            ops.append(.show(name: name, expression: expression, layer: layer))
+        case .show(let name, let expression, let layer, let at):
+            ops.append(.show(name: name, expression: expression, layer: layer, at: at))
         case .hide(let name, let layer):
             ops.append(.hide(name: name, layer: layer))
         case .image(let definition, let expression):
             ops.append(imageOp(definition: definition, expression: expression))
+        case .layeredImage(let image):
+            layeredImages[image.name.lowercased()] = image
         case .play(let channel, let file, let volume, let loop):
             ops.append(.play(channel: channel, file: file, volume: volume, loop: loop))
         case .stop(let channel):
