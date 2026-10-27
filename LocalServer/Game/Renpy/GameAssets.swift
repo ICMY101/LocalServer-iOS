@@ -176,23 +176,32 @@ final class GameAssets {
         return names
     }
 
-    /// 按 Ren'Py 的空格命名习惯找图片：`show bg library` -> `bg library.png`
-    func imageData(named name: String) -> Data? {
+    /// 按 Ren'Py 的空格命名习惯找图片：`show bg library` -> `images/bg/library.png`
+    func imagePath(named name: String) -> String? {
         let lowered = normalized(name)
         // `image bg room = "bg/room.png"` 这种已经带扩展名的路径直接读
-        if hasImageExtension(lowered), let data = read(lowered) { return data }
+        if hasImageExtension(lowered), exists(lowered) { return lowered }
         // images/ 下的自动命名（真实工程基本都是这种布局）
-        if let path = autoImageIndex[Self.spaceName(lowered)], let data = read(path) { return data }
+        if let path = autoImageIndex[Self.spaceName(lowered)] { return path }
         for directory in Self.imageDirectories {
             let base = directory.isEmpty ? lowered : directory + lowered
             for candidate in [base, base.replacingOccurrences(of: " ", with: "_")] {
-                if hasImageExtension(candidate), let data = read(candidate) { return data }
-                for ext in Self.imageExtensions {
-                    if let data = read(candidate + "." + ext) { return data }
+                if hasImageExtension(candidate), exists(candidate) { return candidate }
+                for ext in Self.imageExtensions where exists(candidate + "." + ext) {
+                    return candidate + "." + ext
                 }
             }
         }
         return nil
+    }
+
+    /// `images/fg/`、`images/overlay/`、`characters/` 下的是前景素材：
+    /// 透明画布、要按变换摆放，不能像背景那样整屏拉满
+    func isForegroundImage(at path: String) -> Bool {
+        let lowered = path.lowercased()
+        let directories = ["/fg/", "/overlay/", "/characters/", "/sprite/", "/sprites/"]
+        if directories.contains(where: { lowered.contains($0) }) { return true }
+        return ["fg/", "overlay/", "characters/", "sprite/", "sprites/"].contains { lowered.hasPrefix($0) }
     }
 
     private func hasImageExtension(_ name: String) -> Bool {

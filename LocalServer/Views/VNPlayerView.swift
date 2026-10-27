@@ -12,6 +12,22 @@ struct VNSprite {
     var placement: VNPlacement
 }
 
+/// 播放推进方式
+enum VNPlayMode: String, CaseIterable {
+    case manual = "手动"
+    case auto = "自动"
+    case skip = "跳过"
+}
+
+/// 回顾面板里的一条记录
+struct VNHistoryEntry: Identifiable, Equatable {
+    var id = UUID()
+    var speaker: String?
+    var text: String
+    /// 玩家当时点选的菜单项
+    var isChoice = false
+}
+
 /// 播放器的全部状态。界面只读这些字段，所有推进逻辑都在这里。
 final class VNSession: ObservableObject {
     let game: VNGame
@@ -30,7 +46,11 @@ final class VNSession: ObservableObject {
     @Published private(set) var failure: String?
     @Published private(set) var isFinished = false
     @Published private(set) var slots: [VNSaveSlot] = []
+    @Published private(set) var history: [VNHistoryEntry] = []
+    @Published private(set) var mode: VNPlayMode = .manual
     @Published var notice: String?
+
+    private var autoTimer: Timer?
 
     init(game: VNGame) {
         self.game = game
@@ -70,6 +90,7 @@ final class VNSession: ObservableObject {
         guard let runtime else { return }
         failure = nil
         isFinished = false
+        history = []
         apply(runtime.startNewGame())
     }
 
@@ -80,7 +101,16 @@ final class VNSession: ObservableObject {
 
     func choose(_ index: Int) {
         guard let runtime, runtime.awaitingChoice else { return }
+        if index >= 0, index < choices.count {
+            record(VNHistoryEntry(speaker: nil, text: choices[index].text, isChoice: true))
+        }
         apply(runtime.choose(at: index))
+    }
+
+    /// 手动 / 自动 / 跳过：切换后立刻按新模式安排推进
+    func setMode(_ newMode: VNPlayMode) {
+        mode = newMode
+        scheduleAutoAdvance()
     }
 
     // MARK: - 存档
@@ -112,6 +142,8 @@ final class VNSession: ObservableObject {
         }
         failure = nil
         isFinished = false
+        // 存档里没有历史台词，读档后回顾从这句重新开始
+        history = []
         apply(runtime.outcome, autosave: false)
     }
 
@@ -122,6 +154,8 @@ final class VNSession: ObservableObject {
 
     func stopAudio() {
         audio.stopAll()
+        autoTimer?.invalidate()
+        autoTimer = nil
     }
 
     // MARK: - 状态同步
@@ -134,6 +168,7 @@ final class VNSession: ObservableObject {
             choices = []
             isFinished = false
             speakerColor = color(for: value.speaker)
+            record(VNHistoryEntry(speaker: value.speaker, text: value.text))
         case .choices(let title, let options):
             menuTitle = title
             choices = options
@@ -152,6 +187,36 @@ final class VNSession: ObservableObject {
         if autosave, failure == nil, !isFinished, let runtime {
             try? saves.write(runtime.saveState(), slot: VNSaveSlot.autoID)
         }
+        scheduleAutoAdvance()
+    }
+
+    /// 回顾面板只看得到最近的台词，全量存下来没必要
+    private func record(_ entry: VNHistoryEntry) {
+        if let last = history.last, last.speaker == entry.speaker,
+           last.text == entry.text, last.isChoice == entry.isChoice { return }
+        history.append(entry)
+        if history.count > 300 { history.removeFirst(history.count - 300) }
+    }
+
+    /// 自动模式按文本长度给阅读时间，跳过模式只管往前走
+    private func scheduleAutoAdvance() {
+        autoTimer?.invalidate()
+        autoTimer = nil
+        guard mode != .manual, failure == nil, !isFinished, choices.isEmpty, line != nil else { return }
+        let interval: Double
+        switch mode {
+        case .manual:
+            return
+        case .auto:
+            interval = min(6.0, max(1.6, 0.8 + Double(line?.text.count ?? 0) * 0.1))
+        case .skip:
+            interval = 0.25
+        }
+        let timer = Timer(timeInterval: interval, repeats: false) { [weak self] _ in
+            self?.advance()
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        autoTimer = timer
     }
 
     private func refreshStage() {
@@ -171,7 +236,14 @@ final class VNSession: ObservableObject {
                         continue
                     }
                 }
-                if let image = image(for: shown) { items.append(.background(image)) }
+                guard let path = resourcePath(for: shown), let image = image(at: path) else { continue }
+                // 立绘目录里的图按变换摆放；背景、CG 仍然整屏铺满
+                if let assets, assets.isForegroundImage(at: path) {
+                    items.append(.sprite(VNSprite(parts: [image],
+                                                  placement: VNPlacement.from(at: shown.at))))
+                } else {
+                    items.append(.background(image))
+                }
             }
         }
         stage = items
@@ -187,17 +259,23 @@ final class VNSession: ObservableObject {
         return order
     }
 
-    private func image(for shown: VNShownImage) -> UIImage? {
-        if let resource = shown.resource, let image = image(named: resource) { return image }
-        return image(named: shown.name)
+    /// 图像名对应的资源路径：`image` 语句给的路径优先
+    private func resourcePath(for shown: VNShownImage) -> String? {
+        if let resource = shown.resource, let path = assets?.imagePath(named: resource) { return path }
+        return assets?.imagePath(named: shown.name)
     }
 
     private func image(named name: String) -> UIImage? {
-        if let cached = imageCache[name] { return cached }
-        guard let data = assets?.imageData(named: name), let image = UIImage(data: data) else {
+        guard let path = assets?.imagePath(named: name) else { return nil }
+        return image(at: path)
+    }
+
+    private func image(at path: String) -> UIImage? {
+        if let cached = imageCache[path] { return cached }
+        guard let data = assets?.read(path), let image = UIImage(data: data) else {
             return nil
         }
-        imageCache[name] = image
+        imageCache[path] = image
         return image
     }
 
@@ -216,6 +294,7 @@ struct VNPlayerView: View {
     @Environment(\.dismiss) private var dismiss
     @StateObject private var session: VNSession
     @State private var showSaves = false
+    @State private var showHistory = false
 
     init(game: VNGame) {
         _session = StateObject(wrappedValue: VNSession(game: game))
@@ -242,6 +321,7 @@ struct VNPlayerView: View {
         .onAppear { session.begin() }
         .onDisappear { session.stopAudio() }
         .sheet(isPresented: $showSaves) { VNSaveSheet(session: session) }
+        .sheet(isPresented: $showHistory) { VNHistorySheet(session: session) }
         .alert("提示", isPresented: Binding(
             get: { session.notice != nil },
             set: { if !$0 { session.notice = nil } }
@@ -417,6 +497,14 @@ struct VNPlayerView: View {
         VStack {
             HStack(spacing: 10) {
                 circleButton("xmark") { dismiss() }
+                if session.mode != .manual {
+                    Text(session.mode.rawValue)
+                        .font(.caption2.weight(.semibold))
+                        .foregroundColor(.black)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(Color.white.opacity(0.85), in: Capsule())
+                }
                 Spacer()
                 Text(session.game.title)
                     .font(.footnote.weight(.medium))
@@ -426,6 +514,21 @@ struct VNPlayerView: View {
                 circleButton("tray.and.arrow.down") { showSaves = true }
                 Menu {
                     Button("存档 / 读档") { showSaves = true }
+                    Button("剧情回顾") { showHistory = true }
+                    Divider()
+                    ForEach(VNPlayMode.allCases, id: \.self) { mode in
+                        Button {
+                            session.setMode(mode)
+                        } label: {
+                            HStack {
+                                Text(mode == .manual ? "手动推进" : mode.rawValue)
+                                if session.mode == mode {
+                                    Image(systemName: "checkmark")
+                                }
+                            }
+                        }
+                    }
+                    Divider()
                     Button("从头开始") { session.restart() }
                 } label: {
                     Image(systemName: "ellipsis")
@@ -541,6 +644,67 @@ struct VNSaveSheet: View {
             session.load(from: slot.id)
         }
         dismiss()
+    }
+}
+
+// MARK: - 剧情回顾
+
+struct VNHistorySheet: View {
+    @ObservedObject var session: VNSession
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            ScrollViewReader { proxy in
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 10) {
+                        ForEach(session.history) { entry in
+                            row(entry).id(entry.id)
+                        }
+                    }
+                    .padding(16)
+                }
+                .onAppear {
+                    // 打开时直接停在最新一句
+                    if let last = session.history.last { proxy.scrollTo(last.id, anchor: .bottom) }
+                }
+            }
+            .navigationTitle("剧情回顾")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("关闭") { dismiss() }
+                }
+            }
+            .overlay {
+                if session.history.isEmpty {
+                    Text("还没有台词可以回顾。")
+                        .font(.footnote)
+                        .foregroundColor(.secondary)
+                }
+            }
+        }
+    }
+
+    private func row(_ entry: VNHistoryEntry) -> some View {
+        VStack(alignment: entry.isChoice ? .center : .leading, spacing: 3) {
+            if entry.isChoice {
+                Label(entry.text, systemImage: "hand.tap.fill")
+                    .font(.footnote.weight(.medium))
+                    .foregroundColor(.secondary)
+            } else {
+                if let speaker = entry.speaker, !speaker.isEmpty {
+                    Text(speaker)
+                        .font(.caption.weight(.semibold))
+                        .foregroundColor(.accentColor)
+                }
+                Text(entry.text)
+                    .font(.subheadline)
+                    .foregroundColor(.primary)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: entry.isChoice ? .center : .leading)
+        .padding(.vertical, 4)
     }
 }
 

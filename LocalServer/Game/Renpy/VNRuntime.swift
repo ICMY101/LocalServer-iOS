@@ -57,7 +57,7 @@ struct VNPlacement: Equatable {
     /// 数值取自游戏的 scripts/system/transforms.rpy。
     static func from(at names: [String]?) -> VNPlacement {
         guard let first = names?.first(where: { !$0.isEmpty }) else { return .natural }
-        let (name, argument) = split(first)
+        let (name, x, anchor, y) = split(first)
         var placement: VNPlacement
         switch name {
         case "left":
@@ -77,9 +77,9 @@ struct VNPlacement: Equatable {
         default:
             placement = .natural
         }
-        if let value = argument.x { placement.xpos = value }
-        if let value = argument.xanchor { placement.xanchor = value }
-        if let value = argument.y { placement.ypos = value }
+        if let value = x { placement.xpos = value }
+        if let value = anchor { placement.xanchor = value }
+        if let value = y { placement.ypos = value }
         return placement
     }
 
