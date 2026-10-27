@@ -213,7 +213,12 @@ struct RpyParser {
         var scanner = LineScanner(line.text)
 
         if scanner.match("$") { return parseInlinePython(line) }
-        guard let keyword = scanner.word() else { return [.unknown(line: line.text)] }
+        guard let keyword = scanner.word() else {
+            // 旁白是直接以引号开头的一行，没有说话人关键字
+            var narration = LineScanner(line.text)
+            if let say = parseSay(&narration) { return [say] }
+            return [.unknown(line: line.text)]
+        }
 
         switch keyword {
         case "label":
@@ -347,9 +352,17 @@ struct RpyParser {
                 _ = item.parenthesizedBody()
                 var condition: VNExpr? = nil
                 var showIf: VNExpr? = nil
-                if item.keyword("if") { condition = ExpressionParser.parse(item.expressionUpToColon()) }
-                if item.keyword("showif") { showIf = ExpressionParser.parse(item.expressionUpToColon()) }
-                if item.match(":") {
+                // expressionUpToColon 会把结尾的冒号一起吃掉，就不再要求 match(":")
+                var colonConsumed = false
+                if item.keyword("if") {
+                    condition = ExpressionParser.parse(item.expressionUpToColon())
+                    colonConsumed = true
+                }
+                if item.keyword("showif") {
+                    showIf = ExpressionParser.parse(item.expressionUpToColon())
+                    colonConsumed = true
+                }
+                if colonConsumed || item.match(":") {
                     items.append(VNMenuItem(text: .literal(.string(raw)),
                                             condition: condition,
                                             showIf: showIf,

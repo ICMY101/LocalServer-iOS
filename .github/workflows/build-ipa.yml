@@ -122,8 +122,8 @@ jobs:
             CODE_SIGN_IDENTITY="-" \
             CODE_SIGN_STYLE=Manual \
             | tee test.log | grep -E "error:|Test Case .* (passed|failed)|Executed [0-9]+ tests|TEST (SUCCEEDED|FAILED)" || true
-          # 失败用例和断言信息转成 annotation，方便直接定位
-          grep -m10 -E "error: |Test Case .* failed|Testing failed" test.log | sed 's/%/%25/g' | while IFS= read -r line; do
+          # 失败用例和断言信息转成 annotation，方便直接定位（不要 Test Case 汇总行，占名额）
+          grep -m10 -E "error: |Testing failed" test.log | sed 's/%/%25/g' | while IFS= read -r line; do
             echo "::error::$line"
           done || true
           grep -q "TEST SUCCEEDED" test.log

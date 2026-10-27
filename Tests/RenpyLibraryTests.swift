@@ -4,8 +4,12 @@ import XCTest
 /// 游戏库与存档目录：脚本组装、指纹稳定性、存档读写
 final class RenpyLibraryTests: XCTestCase {
 
+    /// 临时目录一旦释放就会删掉文件，必须在整个用例期间持有
+    private var retained: [TemporaryDirectory] = []
+
     private func makeGame(_ files: [String: String]) throws -> (TemporaryDirectory, GameAssets) {
         let temp = try TemporaryDirectory()
+        retained.append(temp)
         for (path, content) in files {
             try temp.write(path, content)
         }
