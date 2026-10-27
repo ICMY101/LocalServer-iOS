@@ -61,6 +61,7 @@ enum Zlib {
 
                 var result = Data()
                 result.reserveCapacity(data.count * 4)
+                var idle = 0
 
                 while true {
                     stream.dst_size = chunkSize
@@ -69,11 +70,17 @@ enum Zlib {
                     let filled = chunkSize - stream.dst_size
                     if filled > 0 {
                         result.append(contentsOf: UnsafeBufferPointer(start: outputBase, count: filled))
+                        idle = 0
+                    } else {
+                        idle += 1
                     }
                     if stepStatus == COMPRESSION_STATUS_END { return result }
                     if stepStatus == COMPRESSION_STATUS_ERROR { return nil }
-                    // 输出没写满却没收到 END、或输入已耗尽都没走完，说明数据不完整
-                    if stream.dst_size != 0 || stream.src_size == 0 { return nil }
+                    // 输入吃完后解码器可能还会再要一次空输入才报 END；
+                    // 连续两次没有任何进展就当作已经结束
+                    if stream.src_size == 0, idle > 1 {
+                        return result.isEmpty ? nil : result
+                    }
                 }
             }
         }

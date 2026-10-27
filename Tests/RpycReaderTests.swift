@@ -119,6 +119,22 @@ final class RpycReaderTests: XCTestCase {
         }
     }
 
+    /// 容器里的两段都是 zlib 流；解压坏掉时读取会直接返回 nil，先单独验证这一层
+    func testFixtureZlibStreamInflates() throws {
+        let bytes = try data(RpycFixtures.modern)
+        func u32(_ offset: Int) -> Int {
+            Int(bytes[offset]) | Int(bytes[offset + 1]) << 8
+                | Int(bytes[offset + 2]) << 16 | Int(bytes[offset + 3]) << 24
+        }
+        XCTAssertEqual(u32(10), 1, "槽表第一项应该是槽 1")
+        let start = u32(14)
+        let length = u32(18)
+        let chunk = bytes.subdata(in: start..<(start + length))
+        let inflated = Zlib.inflate(chunk)
+        XCTAssertNotNil(inflated, "槽 1 的 zlib 流应该能解压")
+        XCTAssertEqual(inflated?.first, 0x80, "解压后应是 pickle 协议 2")
+    }
+
     func testCorruptDataIsRejected() {
         XCTAssertNil(RpycReader.read(Data([0x00, 0x01, 0x02, 0x03])))
         XCTAssertNil(RpycReader.read(Data()))
