@@ -422,7 +422,9 @@ final class VNEvaluator {
 /// Ren'Py 文本替换。
 ///
 /// `{x}` 插值、`{x=}` 自描述、`{{` / `[[` / `%%` 字面量在这里处理；
-/// 认不出的 `{...}` 原样保留，交给显示层当文本标签（`{b}`、`{size=+2}`、`{nw}` 等）。
+/// `[x]` 也按插值处理（Ren'Py 原生写法）。变量求不出来时当作文本标签：
+/// 少量标签映射成等价字符（`{heart}` → ♥），其余（`{size=+15}`、`{b}`、`{w}` 等）
+/// 直接去掉 —— 播放器只显示纯文本，把标签原样留给玩家看是错的。
 enum VNText {
     static func substitute(_ text: String, using evaluator: VNEvaluator) -> String {
         let characters = Array(text)
@@ -447,9 +449,15 @@ enum VNText {
                 index += 2
                 continue
             }
-            if character == "{", let end = closingBrace(characters, from: index) {
+            if character == "{", let end = closingBrace(characters, from: index, opening: "{", closing: "}") {
                 let content = String(characters[(index + 1)..<end])
                 result += replacement(for: content, using: evaluator)
+                index = end + 1
+                continue
+            }
+            if character == "[", let end = closingBrace(characters, from: index, opening: "[", closing: "]") {
+                let content = String(characters[(index + 1)..<end])
+                result += interpolate(content, using: evaluator) ?? textTag(content)
                 index = end + 1
                 continue
             }
@@ -460,14 +468,15 @@ enum VNText {
         return result
     }
 
-    /// 找到与 index 处的 `{` 配对的 `}`；标签里可能带引号，所以只在同层查找
-    private static func closingBrace(_ characters: [Character], from index: Int) -> Int? {
+    /// 找到与 index 处的开括号配对的闭括号；标签里可能带引号，所以只在同层查找
+    private static func closingBrace(_ characters: [Character], from index: Int,
+                                     opening: Character, closing: Character) -> Int? {
         var position = index + 1
         var depth = 1
         while position < characters.count {
             let character = characters[position]
-            if character == "{" { depth += 1 }
-            if character == "}" {
+            if character == opening { depth += 1 }
+            if character == closing {
                 depth -= 1
                 if depth == 0 { return position }
             }
@@ -477,23 +486,39 @@ enum VNText {
     }
 
     private static func replacement(for content: String, using evaluator: VNEvaluator) -> String {
-        guard !content.isEmpty, !content.hasPrefix("/") else { return "{\(content)}" }
+        guard !content.isEmpty, !content.hasPrefix("/") else { return "" }
 
         // `{name=}`：显示成 `name=值`
         if content.hasSuffix("=") {
             let name = String(content.dropLast())
-            return interpolate(name, label: name + "=", using: evaluator)
+            return interpolate(name, using: evaluator).map { name + "=" + $0 } ?? textTag(content)
         }
-        return interpolate(content, label: nil, using: evaluator)
+        return interpolate(content, using: evaluator) ?? textTag(content)
     }
 
-    private static func interpolate(_ source: String, label: String?, using evaluator: VNEvaluator) -> String {
+    /// 能求值就返回值的显示文本；不是变量（或运行时没有这个变量）返回 nil
+    private static func interpolate(_ source: String, using evaluator: VNEvaluator) -> String? {
         let expression = ExpressionParser.parse(source)
-        // 解析不出来说明是文本标签，原样交给显示层
-        if case .unsupported = expression { return "{\(source)}" }
-        guard let value = evaluator.value(of: expression) else { return "{\(source)}" }
-        let text = value.displayText
-        if let label { return label + text }
-        return text
+        guard !isUnsupported(expression) else { return nil }
+        guard let value = evaluator.value(of: expression) else { return nil }
+        return value.displayText
+    }
+
+    private static func isUnsupported(_ expression: VNExpr) -> Bool {
+        if case .unsupported = expression { return true }
+        return false
+    }
+
+    /// 显示层只认纯文本：认得的小标签换成等价字符，其余标签一律去掉
+    private static func textTag(_ content: String) -> String {
+        let name = content
+            .split(separator: "=", maxSplits: 1)
+            .first
+            .map { String($0).trimmingCharacters(in: .whitespaces).lowercased() } ?? ""
+        switch name {
+        case "heart": return "♥"
+        case "music", "note": return "♪"
+        default: return ""
+        }
     }
 }

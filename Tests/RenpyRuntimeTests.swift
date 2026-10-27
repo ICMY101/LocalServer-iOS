@@ -146,6 +146,42 @@ final class RenpyRuntimeTests: XCTestCase {
         XCTAssertEqual(runtime.layers["master"]?.last?.name, "e smile")
     }
 
+    func testShowReplacesSameTagInsteadOfStacking() {
+        let runtime = VNRuntime(program: compile("""
+        label start:
+            scene bg room
+            show hana beaming
+            show hana angry
+            "第一句"
+            hide hana
+            show cg one
+            show cg two
+            "第二句"
+            return
+        """))
+        _ = runtime.startNewGame()
+        XCTAssertEqual(runtime.layers["master"]?.map(\.name), ["bg room", "hana angry"],
+                       "同一个标签再 show 应替换，而不是两张叠在一起")
+        _ = runtime.advance()
+        XCTAssertEqual(runtime.layers["master"]?.map(\.name), ["bg room", "cg two"],
+                       "hide 按标签移除，CG 换图也替换旧图")
+    }
+
+    func testRenpyTextTagsDoNotReachThePlayer() {
+        let runtime = VNRuntime(program: compile("""
+        define points = 7
+
+        label start:
+            "你好 {size=+15}!?{/size} {heart}{music}"
+            "分数 {points}"
+            return
+        """))
+        guard case .line(let first) = runtime.startNewGame() else { return XCTFail("应该有一句台词") }
+        XCTAssertEqual(first.text, "你好 !? ♥♪")
+        guard case .line(let second) = runtime.advance() else { return XCTFail("应该还有一句") }
+        XCTAssertEqual(second.text, "分数 7", "变量插值不受标签清理影响")
+    }
+
     // MARK: - 存档
 
     func testSaveLoadRoundTripKeepsPositionAndVariables() throws {

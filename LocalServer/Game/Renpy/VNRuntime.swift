@@ -30,6 +30,14 @@ struct VNShownImage: Codable, Equatable {
     var name: String
     /// `image` 语句解析出来的资源路径
     var resource: String?
+
+    /// Ren'Py 的图像标签是名字的第一个词：`show e happy` 的标签是 `e`。
+    /// 同一个标签再 show 一次是替换，不是叠加。
+    var tag: String { Self.tag(of: name) }
+
+    static func tag(of name: String) -> String {
+        name.split(separator: " ", maxSplits: 1).first.map(String.init) ?? name
+    }
 }
 
 /// 一条音频通道
@@ -278,7 +286,8 @@ final class VNRuntime {
             layers[layer] = name.map { [shown(named: $0)] } ?? []
         case .show(let name, let expression, let layer):
             var images = layers[layer] ?? []
-            images.removeAll { $0.name == name }
+            let tag = VNShownImage.tag(of: name)
+            images.removeAll { $0.tag == tag }
             if let expression, let value = evaluator.value(of: expression), case .string(let path) = value {
                 images.append(VNShownImage(name: name, resource: path))
             } else {
@@ -286,7 +295,8 @@ final class VNRuntime {
             }
             layers[layer] = images
         case .hide(let name, let layer):
-            layers[layer] = (layers[layer] ?? []).filter { $0.name != name }
+            let tag = VNShownImage.tag(of: name)
+            layers[layer] = (layers[layer] ?? []).filter { $0.tag != tag }
         case .play(let channel, let file, let volume, let loop):
             let path = file.flatMap { expression -> String? in
                 if let text = evaluator.value(of: expression)?.stringValue { return text }

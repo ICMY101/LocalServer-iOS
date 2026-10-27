@@ -68,8 +68,8 @@ enum VNGameLibrary {
     /// 不少发行包只留一两个 .rpy 配置脚本，剧情全在 .rpyc 里，不能让它挡住编译脚本。
     /// 文件名参与指纹，重命名或改脚本都会让旧存档失效。
     static func program(for game: VNGame, assets: GameAssets) -> (program: VNProgram?, issues: [String]) {
-        let sources = assets.names(withExtension: "rpy").sorted()
-        let binaries = assets.names(withExtension: "rpyc").sorted()
+        let sources = defaultLanguage(assets.names(withExtension: "rpy")).sorted()
+        let binaries = defaultLanguage(assets.names(withExtension: "rpyc")).sorted()
 
         let compiledSources = sources.isEmpty ? nil : compile(sources, assets: assets, binary: false)
         if let compiledSources, compiledSources.program?.startIndex != nil {
@@ -79,6 +79,15 @@ enum VNGameLibrary {
             return compile(binaries, assets: assets, binary: true)
         }
         return compiledSources ?? (nil, ["没有找到 .rpy 或 .rpyc 脚本。"])
+    }
+
+    /// 默认语言的脚本：`tl/` 下除 `tl/None` 之外的目录都是翻译副本，
+    /// 读进来只会白白解码（内容本来也会被跳过），发行包里这部分常常占大头。
+    private static func defaultLanguage(_ names: [String]) -> [String] {
+        names.filter { name in
+            let key = RenPyArchive.key(name)
+            return !key.hasPrefix("tl/") || key.hasPrefix("tl/none/")
+        }
     }
 
     private static func compile(_ names: [String], assets: GameAssets,
