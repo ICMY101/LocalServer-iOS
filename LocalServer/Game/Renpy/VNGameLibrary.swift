@@ -9,7 +9,7 @@ struct VNGame: Identifiable, Equatable {
     var scriptCount: Int
     var archiveCount: Int
 
-    /// 没有 .rpy 就只有 .rpa，脚本读不出来
+    /// 只有 .rpa 归档、没有脚本时读不出剧情
     var isPlayable: Bool { scriptCount > 0 }
 }
 
@@ -21,7 +21,7 @@ enum VNGameError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .noScripts:
-            return "这个压缩包里没有找到 .rpy 脚本，可能只有 .rpyc 编译文件，暂时无法运行。"
+            return "这个压缩包里没有找到 .rpy/.rpyc 脚本或 .rpa 归档，无法运行。"
         case .unsupportedPackage(let name):
             return "不支持导入 \(name)。请提供文件夹、.zip，或单独的 .rpa 文件。"
         case .copyFailed:
@@ -54,7 +54,7 @@ enum VNGameLibrary {
             return VNGame(id: url.lastPathComponent,
                           title: url.lastPathComponent,
                           folder: assets.root,
-                          scriptCount: assets.names(withExtension: "rpy").count,
+                          scriptCount: scriptCount(in: assets),
                           archiveCount: assets.archiveCount)
         }.sorted { $0.title.localizedStandardCompare($1.title) == .orderedAscending }
     }
@@ -64,36 +64,76 @@ enum VNGameLibrary {
         return GameAssets.locate(from: folder)
     }
 
-    /// 把所有 .rpy 解析、编译成一份程序。
+    /// 所有脚本解析、编译成一份程序：源码里有 start 就优先用源码，否则读编译脚本。
+    /// 不少发行包只留一两个 .rpy 配置脚本，剧情全在 .rpyc 里，不能让它挡住编译脚本。
     /// 文件名参与指纹，重命名或改脚本都会让旧存档失效。
     static func program(for game: VNGame, assets: GameAssets) -> (program: VNProgram?, issues: [String]) {
-        let names = assets.names(withExtension: "rpy").sorted()
-        var sources: [(name: String, text: String)] = []
-        for name in names {
-            if let text = assets.text(name) { sources.append((name, text)) }
+        let sources = assets.names(withExtension: "rpy").sorted()
+        let binaries = assets.names(withExtension: "rpyc").sorted()
+
+        let compiledSources = sources.isEmpty ? nil : compile(sources, assets: assets, binary: false)
+        if let compiledSources, compiledSources.program?.startIndex != nil {
+            return compiledSources
         }
-        guard !sources.isEmpty else {
-            return (nil, ["没有可读的 .rpy 脚本，可能只有 .rpa 归档或 .rpyc 编译文件。"])
+        if !binaries.isEmpty {
+            return compile(binaries, assets: assets, binary: true)
+        }
+        return compiledSources ?? (nil, ["没有找到 .rpy 或 .rpyc 脚本。"])
+    }
+
+    private static func compile(_ names: [String], assets: GameAssets,
+                                binary: Bool) -> (program: VNProgram?, issues: [String]) {
+        var statements: [VNStmt] = []
+        var issues: [String] = []
+        var parts: [(name: String, bytes: [UInt8])] = []
+
+        for name in names {
+            guard let data = assets.read(name) else {
+                issues.append("读取失败：\(name)")
+                continue
+            }
+            if binary {
+                guard let script = RpycReader.read(data) else {
+                    issues.append("无法解析编译脚本：\(name)")
+                    continue
+                }
+                statements.append(contentsOf: script.statements)
+                issues.append(contentsOf: script.warnings)
+            } else {
+                statements.append(contentsOf: RpyParser.parse(String(decoding: data, as: UTF8.self)))
+            }
+            parts.append((name, [UInt8](data)))
         }
 
-        var statements: [VNStmt] = []
-        for source in sources {
-            statements.append(contentsOf: RpyParser.parse(source.text))
-        }
-        let fingerprint = fingerprint(of: sources)
+        guard !parts.isEmpty else { return (nil, issues) }
+        return compiled(statements, fingerprint: fingerprint(of: parts), issues: issues)
+    }
+
+    /// 可执行脚本数：源码和编译脚本都是同一批文件时取较多的那一边
+    static func scriptCount(in assets: GameAssets) -> Int {
+        max(assets.names(withExtension: "rpy").count,
+            assets.names(withExtension: "rpyc").count)
+    }
+
+    private static func compiled(_ statements: [VNStmt], fingerprint: String,
+                                 issues: [String]) -> (program: VNProgram?, issues: [String]) {
         let program = VNCompiler.compile(statements, fingerprint: fingerprint)
-        var issues = program.warnings
+        var all = issues + program.warnings
         if program.startIndex == nil {
-            issues.append("脚本里没有 start 标签，也没有任何标签。")
+            all.append("脚本里没有 start 标签，也没有任何标签。")
         }
-        return (program, issues)
+        return (program, all)
     }
 
     /// FNV-1a 64 位：不依赖 CryptoKit，跨设备、跨启动都稳定
-    private static func fingerprint(of sources: [(name: String, text: String)]) -> String {
+    private static func fingerprint(of sources: [(name: String, bytes: [UInt8])]) -> String {
         var hash: UInt64 = 0xcbf2_9ce4_8422_2325
         for source in sources {
-            for byte in (source.name + "\u{0}" + source.text).utf8 {
+            for byte in (source.name + "\u{0}").utf8 {
+                hash ^= UInt64(byte)
+                hash = hash &* 0x0000_0100_0000_01b3
+            }
+            for byte in source.bytes {
                 hash ^= UInt64(byte)
                 hash = hash &* 0x0000_0100_0000_01b3
             }
@@ -147,7 +187,7 @@ enum VNGameLibrary {
         return VNGame(id: destination.lastPathComponent,
                       title: destination.lastPathComponent,
                       folder: assets.root,
-                      scriptCount: assets.names(withExtension: "rpy").count,
+                      scriptCount: scriptCount(in: assets),
                       archiveCount: assets.archiveCount)
     }
 

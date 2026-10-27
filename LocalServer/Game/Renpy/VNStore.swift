@@ -222,6 +222,9 @@ final class VNEvaluator {
         }
 
         switch name {
+        case "_", "__", "_p":
+            // 翻译函数：默认语言下原样返回文本
+            return values.first
         case "Character":
             // 说话人显示名就是第一个参数；图像一类的附加参数我们不求值
             return .opaque(values.first?.displayText ?? "")

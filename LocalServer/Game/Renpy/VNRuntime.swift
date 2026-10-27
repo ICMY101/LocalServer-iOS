@@ -149,7 +149,9 @@ final class VNRuntime {
         awaitingChoice = false
         lastLine = nil
         for op in program.initOps {
-            if let message = execute(op) { return fail(message) }
+            // 发行包的 define 里常出现 Movie、Fade、游戏自定义函数等我们求不出来的值；
+            // init 只是打底，跳过即可，不能让整个游戏起不来
+            _ = execute(op)
         }
         guard let start = program.startIndex else {
             return fail("脚本里没有可用的标签")
@@ -188,6 +190,13 @@ final class VNRuntime {
                 return presentMenu(title: title, items: items)
             case .jump(let target):
                 pc = target
+            case .jumpExpression(let expression, let fallback, _):
+                if let name = evaluator.value(of: expression)?.stringValue,
+                   let target = program.index(ofLabel: name) {
+                    pc = target
+                } else {
+                    pc = fallback
+                }
             case .jumpIf(let condition, let target):
                 pc = evaluator.truth(of: condition) ? target : pc + 1
             case .jumpIfFalse(let condition, let target):
@@ -279,8 +288,11 @@ final class VNRuntime {
         case .hide(let name, let layer):
             layers[layer] = (layers[layer] ?? []).filter { $0.name != name }
         case .play(let channel, let file, let volume, let loop):
-            let path = file.flatMap { expression in
-                evaluator.value(of: expression).flatMap { $0.stringValue ?? $0.displayText }
+            let path = file.flatMap { expression -> String? in
+                if let text = evaluator.value(of: expression)?.stringValue { return text }
+                // Ren'Py 允许裸词文件名（`play music porch_swing_days`），求不出来时按字面量用
+                if case .variable(let name) = expression { return name }
+                return nil
             }
             tracks[channel] = VNTrack(file: path, volume: volume, loop: loop)
         case .stop(let channel):

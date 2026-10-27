@@ -234,7 +234,12 @@ struct RpyParser {
         case "menu":
             return parseMenu(&scanner, line: line)
         case "jump":
-            guard !scanner.keyword("expression"), let target = labelName(&scanner) else {
+            if scanner.keyword("expression") {
+                let source = scanner.rest()
+                return source.isEmpty ? [.unknown(line: line.text)]
+                                     : [.jumpExpression(ExpressionParser.parse(source), source: source)]
+            }
+            guard let target = labelName(&scanner) else {
                 return [.unknown(line: line.text)]
             }
             return [.jump(label: target)]
@@ -470,10 +475,12 @@ struct RpyParser {
     private mutating func parsePlay(_ scanner: inout LineScanner, line: LogicalLine) -> [VNStmt] {
         guard let channel = scanner.word() else { return [.unknown(line: line.text)] }
         let file = fileExpression(&scanner)
-        var loop = false
+        // music 通道默认循环，其余通道默认不循环，和 Ren'Py 的通道默认值一致
+        var loop = channel == "music"
         var volume = 1.0
         while !scanner.isAtEnd {
             if scanner.keyword("loop") { loop = true; continue }
+            if scanner.keyword("noloop") { loop = false; continue }
             if scanner.keyword("volume") { volume = scanner.doubleValue() ?? volume; continue }
             scanner.skipToken()
         }

@@ -100,7 +100,7 @@ struct VNLibraryView: View {
             } header: {
                 Text("\(games.count) 部游戏")
             } footer: {
-                Text("游戏文件放在“文件 › \(VNGameLibrary.rootFolderName)”。只有 .rpa 没有 .rpy 的游戏暂时无法运行。")
+                Text("游戏文件放在“文件 › \(VNGameLibrary.rootFolderName)”。只有 .rpa 归档、没有脚本的游戏暂时无法运行。")
             }
 
             Section {
@@ -135,7 +135,7 @@ struct VNLibraryView: View {
 
     private func subtitle(for game: VNGame) -> String {
         if !game.isPlayable {
-            return "只有归档，没有可读的 .rpy 脚本"
+            return "只有归档，没有可读的 .rpy/.rpyc 脚本"
         }
         var parts = ["\(game.scriptCount) 个脚本"]
         if game.archiveCount > 0 { parts.append("\(game.archiveCount) 个归档") }

@@ -15,6 +15,8 @@ enum VNOp {
     case say(character: VNExpr?, who: String?, text: VNExpr, attributes: [String])
     case menu(title: VNExpr?, items: [VNMenuOption])
     case jump(Int)
+    /// `jump expression`：求值得到标签名就跳过去，求不出来时用编译期选好的兜底位置
+    case jumpExpression(VNExpr, fallback: Int, source: String)
     case jumpIf(VNExpr, Int)
     case jumpIfFalse(VNExpr, Int)
     case call(label: Int, parameters: [String], arguments: [VNExpr])
@@ -91,6 +93,8 @@ struct VNCompiler {
     private var labels: [VNLabel] = []
     private var patches: [Patch] = []
     private var warnings: [String] = []
+    /// 正在编译的标签，动态跳转选兜底标签时用来排除自己
+    private var currentLabel: String?
 
     private struct Patch {
         enum Kind {
@@ -98,9 +102,11 @@ struct VNCompiler {
             case jumpIf(VNExpr)
             case jumpIfFalse(VNExpr)
             case call([VNExpr])
+            case jumpExpression(VNExpr, String)
         }
         var site: Int
         var label: String
+        var owner: String? = nil
         var kind: Kind
     }
 
@@ -145,6 +151,7 @@ struct VNCompiler {
             return
         }
         labels.append(VNLabel(name: name, index: ops.count, parameters: parameters))
+        currentLabel = name
     }
 
     // MARK: - 语句体
@@ -167,6 +174,8 @@ struct VNCompiler {
             emitMenu(title: title, items: items)
         case .jump(let label):
             appendPatch(.jump, label: label)
+        case .jumpExpression(let expression, let source):
+            appendDynamicJump(expression, source: source)
         case .jumpIf(let condition, let label):
             appendPatch(.jumpIf(condition), label: label)
         case .call(let label, let arguments):
@@ -219,7 +228,13 @@ struct VNCompiler {
     }
 
     private mutating func appendPatch(_ kind: Patch.Kind, label: String) {
-        patches.append(Patch(site: ops.count, label: label, kind: kind))
+        patches.append(Patch(site: ops.count, label: label, owner: currentLabel, kind: kind))
+        ops.append(.jump(-1))
+    }
+
+    private mutating func appendDynamicJump(_ expression: VNExpr, source: String) {
+        patches.append(Patch(site: ops.count, label: "", owner: currentLabel,
+                             kind: .jumpExpression(expression, source)))
         ops.append(.jump(-1))
     }
 
@@ -288,6 +303,14 @@ struct VNCompiler {
     private mutating func resolve() -> [VNOp] {
         var result = ops
         for patch in patches {
+            if case .jumpExpression(let expression, let source) = patch.kind {
+                let fallback = fallbackEntry(excluding: patch.owner) ?? patch.site + 1
+                if let label = labels.first(where: { $0.index == fallback }) {
+                    warnings.append("动态跳转 \(source) 无法直接求值，将从 \(label.name) 开始")
+                }
+                result[patch.site] = .jumpExpression(expression, fallback: fallback, source: source)
+                continue
+            }
             guard let target = labels.first(where: { $0.name == patch.label })?.index else {
                 result[patch.site] = .problem("找不到标签：\(patch.label)")
                 continue
@@ -302,10 +325,33 @@ struct VNCompiler {
             case .call(let arguments):
                 let parameters = labels.first { $0.name == patch.label }?.parameters ?? []
                 result[patch.site] = .call(label: target, parameters: parameters, arguments: arguments)
+            case .jumpExpression:
+                break
             }
         }
         result.append(.end)
         return result
+    }
+
+    /// 动态跳转求不出标签名时的兜底：按编译顺序选第一个「没有别的静态跳转指向、
+    /// 也不是引擎保留标签」的普通标签。发行包的 start 常常用
+    /// `jump expression game.get_start_label()` 选第一章，靠这个规则能落到第一章。
+    private func fallbackEntry(excluding owner: String?) -> Int? {
+        let referenced = Set(patches.compactMap { patch -> String? in
+            if case .jumpExpression = patch.kind { return nil }
+            return patch.label
+        })
+        let reserved: Set<String> = ["start", "main_menu", "splashscreen", "after_load", "after_warp",
+                                     "before_main_menu", "load_failed", "missing_label", "quit"]
+        return labels
+            .filter { label in
+                label.name != owner
+                    && !label.name.hasPrefix("_")
+                    && !reserved.contains(label.name)
+                    && !referenced.contains(label.name)
+            }
+            .min { $0.index < $1.index }?
+            .index
     }
 
     private func describe(_ statement: VNStmt) -> String {

@@ -112,6 +112,8 @@ indirect enum VNStmt {
     case say(character: VNExpr?, who: String?, text: VNExpr, attributes: [String])
     case menu(title: VNExpr?, items: [VNMenuItem])
     case jump(label: String)
+    /// `jump expression 表达式`：运行时才算出标签名
+    case jumpExpression(VNExpr, source: String)
     case jumpIf(VNExpr, label: String)
     case call(label: String, arguments: [VNExpr])
     case returnStatement

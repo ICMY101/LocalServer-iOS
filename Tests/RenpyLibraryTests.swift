@@ -57,6 +57,22 @@ final class RenpyLibraryTests: XCTestCase {
         XCTAssertNotNil(assets.imageData(named: "bg/room.png"), "定义里写全路径时应该直接命中")
     }
 
+    func testAutomaticImageAndAudioNames() throws {
+        let temp = try TemporaryDirectory()
+        retained.append(temp)
+        try temp.write("game/script.rpy", "label start:\n    return\n")
+        try temp.write("game/images/bg/home_front_night.webp", Data([1, 2, 3]))
+        try temp.write("game/images/fg/hana/face_smiling.webp", Data([4]))
+        try temp.write("game/audio/bgm/porch_swing_days.ogg", Data([5]))
+        let assets = try XCTUnwrap(GameAssets.locate(from: temp.url))
+
+        XCTAssertNotNil(assets.imageData(named: "bg home front night"), "images/bg/home_front_night.webp 应能按自动命名命中")
+        XCTAssertNotNil(assets.imageData(named: "fg hana face smiling"), "多层目录同样要展开成空格名")
+        XCTAssertNotNil(assets.audioData(named: "porch_swing_days"), "裸文件名应能找到 audio/bgm 下的音乐")
+        XCTAssertNotNil(assets.audioData(named: "bgm/porch_swing_days"))
+        XCTAssertNil(assets.imageData(named: "bg not here"))
+    }
+
     func testGameWithOnlyArchiveIsNotPlayable() throws {
         let temp = try TemporaryDirectory()
         let empty = temp.url.appendingPathComponent("empty", isDirectory: true)
@@ -69,6 +85,41 @@ final class RenpyLibraryTests: XCTestCase {
         XCTAssertNil(result.program)
         XCTAssertFalse(result.issues.isEmpty)
     }
+
+    func testObfuscatedArchiveIsReadable() throws {
+        let temp = try TemporaryDirectory()
+        retained.append(temp)
+        let payload = try XCTUnwrap(Data(base64Encoded: ArchiveFixtures.obfuscated))
+        let url = try temp.write("game/demo.rpa", payload)
+
+        let archive = try XCTUnwrap(RenPyArchive.open(url: url), "魔数被改过、索引是 7 元组的归档也要能打开")
+        XCTAssertTrue(archive.contains("scripts/scenario/start.rpyc"))
+        XCTAssertEqual(archive.data(for: "images/bg room.png"), Data("not-a-real-png".utf8))
+    }
+
+    func testStraySourceFileDoesNotShadowCompiledScripts() throws {
+        // 发行包常常只留一个没有标签的配置脚本，剧情全在 .rpyc 里
+        let temp = try TemporaryDirectory()
+        retained.append(temp)
+        let payload = try XCTUnwrap(Data(base64Encoded: ArchiveFixtures.obfuscated))
+        try temp.write("game/scripts.rpa", payload)
+        try temp.write("game/conversion_tracking.rpy", "define config.name = \"Demo\"\n")
+
+        let assets = try XCTUnwrap(GameAssets.locate(from: temp.url))
+        XCTAssertEqual(VNGameLibrary.scriptCount(in: assets), 1)
+        let game = VNGame(id: "demo", title: "demo", folder: assets.root,
+                          scriptCount: 1, archiveCount: assets.archiveCount)
+        let result = VNGameLibrary.program(for: game, assets: assets)
+        let program = try XCTUnwrap(result.program, result.issues.joined(separator: "\n"))
+        XCTAssertNotNil(program.startIndex, "剧情应该来自归档里的编译脚本")
+
+        let runtime = VNRuntime(program: program)
+        guard case .line(let first) = runtime.startNewGame() else {
+            return XCTFail("应该能开始播放")
+        }
+        XCTAssertEqual(first.text, "准备出发。")
+    }
+
 
     // MARK: - 存档目录
 
