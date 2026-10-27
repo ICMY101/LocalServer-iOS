@@ -139,6 +139,8 @@ final class RenpyLibraryTests: XCTestCase {
         XCTAssertFalse(slot.isEmpty)
         XCTAssertEqual(slot.preview, "你好")
         XCTAssertEqual(slot.label, "start")
+        XCTAssertNotNil(slot.progressText(totalSteps: program.ops.count), "存档位置要能算出完成度")
+        XCTAssertNil(slot.progressText(totalSteps: 0), "脚本长度未知时不显示百分比")
 
         let state = try XCTUnwrap(store.read("1"))
         let restored = VNRuntime(program: program)

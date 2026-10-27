@@ -9,11 +9,20 @@ struct VNSaveSlot: Identifiable, Equatable {
     var label: String?
     var preview: String?
     var savedAt: Date?
+    /// 存档点在指令序列里的位置，配合脚本总长度算出完成度
+    var pc: Int?
 
     var isEmpty: Bool { savedAt == nil }
 
     var title: String {
         id == Self.autoID ? "自动存档" : "存档 \(id)"
+    }
+
+    /// 没有总长度（比如脚本重新编译过）就不显示百分比
+    func progressText(totalSteps: Int) -> String? {
+        guard let pc, totalSteps > 0 else { return nil }
+        let ratio = Double(min(pc, totalSteps)) / Double(totalSteps)
+        return "完成度 \(Int((ratio * 100).rounded()))%"
     }
 }
 
@@ -32,9 +41,9 @@ final class VNSaveStore {
 
     func slots() -> [VNSaveSlot] {
         [VNSaveSlot.autoID].map { id in
-            metadata(for: id) ?? VNSaveSlot(id: id, label: nil, preview: nil, savedAt: nil)
+            metadata(for: id) ?? VNSaveSlot(id: id, label: nil, preview: nil, savedAt: nil, pc: nil)
         } + VNSaveSlot.manualIDs.map { id in
-            metadata(for: id) ?? VNSaveSlot(id: id, label: nil, preview: nil, savedAt: nil)
+            metadata(for: id) ?? VNSaveSlot(id: id, label: nil, preview: nil, savedAt: nil, pc: nil)
         }
     }
 
@@ -68,7 +77,8 @@ final class VNSaveStore {
 
     private func metadata(for slot: String) -> VNSaveSlot? {
         guard let state = read(slot) else { return nil }
-        return VNSaveSlot(id: slot, label: state.label, preview: state.preview, savedAt: state.savedAt)
+        return VNSaveSlot(id: slot, label: state.label, preview: state.preview,
+                          savedAt: state.savedAt, pc: state.pc)
     }
 
     private func fileURL(for slot: String) -> URL {

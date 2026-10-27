@@ -134,6 +134,9 @@ final class VNSession: ObservableObject {
         slots = saves.slots()
     }
 
+    /// 脚本的指令总数，用来把存档位置换算成完成度
+    var totalSteps: Int { runtime?.program.ops.count ?? 0 }
+
     func save(to slot: String) {
         guard let runtime, failure == nil else { return }
         do {
@@ -662,10 +665,17 @@ struct VNSaveSheet: View {
                 }
             }
             Spacer()
-            if let label = slot.label {
-                Text(label)
-                    .font(.caption2)
-                    .foregroundColor(.secondary)
+            VStack(alignment: .trailing, spacing: 4) {
+                if let progress = slot.progressText(totalSteps: session.totalSteps) {
+                    Text(progress)
+                        .font(.caption2.monospacedDigit())
+                        .foregroundColor(.secondary)
+                }
+                if let label = slot.label {
+                    Text(label)
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                }
             }
         }
         .padding(.vertical, 4)
