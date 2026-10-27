@@ -75,6 +75,23 @@ final class RenpyLibraryTests: XCTestCase {
         XCTAssertNil(assets.imagePath(named: "bg not here"))
     }
 
+    func testImportCopiesGameFolderRecursively() throws {
+        let temp = try TemporaryDirectory()
+        retained.append(temp)
+        try temp.write("Indecent Demo/game/script.rpy", "label start:\n    \"你好\"\n    return\n")
+        try temp.write("Indecent Demo/game/images/bg/room.png", "png")
+        try temp.write("Indecent Demo/README.txt", "说明文件")
+
+        let source = temp.url.appendingPathComponent("Indecent Demo", isDirectory: true)
+        let game = try VNGameLibrary.importGame(from: source)
+        defer { VNGameLibrary.delete(game) }
+
+        XCTAssertEqual(game.title, "Indecent Demo")
+        XCTAssertEqual(game.scriptCount, 1)
+        XCTAssertNotNil(VNGameLibrary.assets(for: game))
+        XCTAssertTrue(VNGameLibrary.games().contains { $0.id == game.id })
+    }
+
     func testGameWithOnlyArchiveIsNotPlayable() throws {
         let temp = try TemporaryDirectory()
         let empty = temp.url.appendingPathComponent("empty", isDirectory: true)
